@@ -93,7 +93,30 @@ export async function fetchCurrentUser(baseUrl: string, token: string): Promise<
     return data.data;
 }
 
-// ── 钱包相关 ──────────────────────────────────────────────
+// ── API Key 管理 ──────────────────────────────────────────
+
+export async function createDefaultApiKey(baseUrl: string, token: string): Promise<string> {
+    const res = await axios.post<{ success: boolean; message?: string; data?: { key?: string } | null }>(
+        authApiUrl(baseUrl, "/api/token/"),
+        {
+            name: "默认",
+            remain_quota: 0,
+            expired_time: -1,
+            unlimited_quota: true,
+            model_limits_enabled: false,
+            model_limits: "",
+            allow_ips: "",
+            allow_user_quota_query: true,
+            group: "default",
+            auto_groups: [],
+            cross_group_retry: false,
+        },
+        { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.data.success) throw new Error(res.data.message || "创建 API Key 失败");
+    return res.data.data?.key ?? "";
+}
+
 
 function walletHeaders(token: string) {
     return { Authorization: `Bearer ${token}` };

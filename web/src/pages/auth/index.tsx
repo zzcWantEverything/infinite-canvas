@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { App, Button, Form, Input, Tabs } from "antd";
 import { useNavigate } from "react-router-dom";
 
-import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode } from "@/services/api/auth";
+import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, createDefaultApiKey } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
@@ -102,9 +102,17 @@ export default function AuthPage() {
                 email: values.email || undefined,
                 verification_code: values.verificationCode || undefined,
             });
-            void message.success("注册成功，请登录");
-            setTab("login");
-            loginForm.setFieldValue("username", values.username);
+            // 注册完自动登录并创建默认 API Key
+            const loginResult = await loginWithPassword(baseUrl, values.username, values.password);
+            setSession({ token: loginResult.token, baseUrl, user: loginResult.user });
+            try {
+                const apiKey = await createDefaultApiKey(baseUrl, loginResult.token);
+                importChannelCredentials({ baseUrl, apiKey: apiKey || loginResult.token });
+            } catch {
+                importChannelCredentials({ baseUrl, apiKey: loginResult.token });
+            }
+            void message.success("注册成功");
+            navigate("/");
         } catch (err) {
             void message.error(err instanceof Error ? err.message : "注册失败");
         } finally {
