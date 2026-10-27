@@ -6,8 +6,9 @@ import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, cre
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
-// 固定后端地址，生产和开发统一用环境变量，默认指向部署服务器
-const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "http://119.45.0.224:3000").replace(/\/+$/, "");
+// 开发环境走 vite proxy（相对路径），生产走 nginx 反向代理（也是相对路径）
+// 如需直连远端可设 VITE_API_BASE，但通常保持空让 nginx 代理
+const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/\/+$/, "");
 
 type LoginValues = { username: string; password: string };
 type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };

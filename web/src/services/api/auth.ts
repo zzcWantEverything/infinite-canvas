@@ -28,9 +28,8 @@ export type SystemStatus = {
 };
 
 function authApiUrl(baseUrl: string, path: string) {
-    if (import.meta.env.DEV) {
-        return path;
-    }
+    // 开发环境走 vite proxy，生产环境走同域 nginx 反向代理，baseUrl 传空即可
+    if (!baseUrl) return path;
     return `${baseUrl.trim().replace(/\/+$/, "")}${path}`;
 }
 
