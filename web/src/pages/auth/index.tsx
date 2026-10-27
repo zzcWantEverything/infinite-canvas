@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { App, Button, Form, Input, Tabs } from "antd";
 import { useNavigate } from "react-router-dom";
 
-import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, createDefaultApiKey } from "@/services/api/auth";
+import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, createDefaultApiKey, fetchUserTokens } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
@@ -78,7 +78,19 @@ export default function AuthPage() {
         try {
             const result = await loginWithPassword(baseUrl, values.username, values.password);
             setSession({ token: result.token, baseUrl, user: result.user });
-            importChannelCredentials({ baseUrl, apiKey: result.token });
+            // 检查是否已有 API Key，没有则自动创建一个默认的
+            try {
+                const tokens = await fetchUserTokens(baseUrl, result.token);
+                const existingKey = tokens.find((t) => t.key)?.key;
+                if (existingKey) {
+                    importChannelCredentials({ baseUrl, apiKey: existingKey });
+                } else {
+                    const newKey = await createDefaultApiKey(baseUrl, result.token);
+                    importChannelCredentials({ baseUrl, apiKey: newKey || result.token });
+                }
+            } catch {
+                importChannelCredentials({ baseUrl, apiKey: result.token });
+            }
             void message.success("登录成功");
             navigate("/");
         } catch (err) {
@@ -102,17 +114,9 @@ export default function AuthPage() {
                 email: values.email || undefined,
                 verification_code: values.verificationCode || undefined,
             });
-            // 注册完自动登录并创建默认 API Key
-            const loginResult = await loginWithPassword(baseUrl, values.username, values.password);
-            setSession({ token: loginResult.token, baseUrl, user: loginResult.user });
-            try {
-                const apiKey = await createDefaultApiKey(baseUrl, loginResult.token);
-                importChannelCredentials({ baseUrl, apiKey: apiKey || loginResult.token });
-            } catch {
-                importChannelCredentials({ baseUrl, apiKey: loginResult.token });
-            }
-            void message.success("注册成功");
-            navigate("/");
+            void message.success("注册成功，请登录");
+            setTab("login");
+            loginForm.setFieldValue("username", values.username);
         } catch (err) {
             void message.error(err instanceof Error ? err.message : "注册失败");
         } finally {

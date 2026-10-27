@@ -95,6 +95,14 @@ export async function fetchCurrentUser(baseUrl: string, token: string): Promise<
 
 // ── API Key 管理 ──────────────────────────────────────────
 
+export async function fetchUserTokens(baseUrl: string, token: string): Promise<{ id: number; key: string }[]> {
+    const res = await axios.get<{ success: boolean; data?: { id: number; key: string }[] | null }>(
+        authApiUrl(baseUrl, "/api/token/"),
+        { headers: { Authorization: `Bearer ${token}` } },
+    );
+    return res.data.data ?? [];
+}
+
 export async function createDefaultApiKey(baseUrl: string, token: string): Promise<string> {
     const res = await axios.post<{ success: boolean; message?: string; data?: { key?: string } | null }>(
         authApiUrl(baseUrl, "/api/token/"),
