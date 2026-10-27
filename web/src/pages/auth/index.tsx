@@ -1,12 +1,19 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { App, Button, Form, Input, Tabs } from "antd";
 import { useNavigate } from "react-router-dom";
 
-import { loginWithPassword, registerUser } from "@/services/api/auth";
+import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
-type FormValues = { baseUrl: string; username: string; password: string };
+type LoginValues = { baseUrl: string; username: string; password: string };
+type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };
+
+function getBaseUrl(formBaseUrl: string) {
+    return import.meta.env.DEV
+        ? (import.meta.env.VITE_API_BASE as string || "http://119.45.0.224:3000").replace(/\/+$/, "")
+        : formBaseUrl.trim().replace(/\/+$/, "");
+}
 
 export default function AuthPage() {
     const { message } = App.useApp();
@@ -15,23 +22,91 @@ export default function AuthPage() {
     const importChannelCredentials = useConfigStore((state) => state.importChannelCredentials);
     const [loading, setLoading] = useState(false);
     const [tab, setTab] = useState<"login" | "register">("login");
-    const [form] = Form.useForm<FormValues>();
+    const [loginForm] = Form.useForm<LoginValues>();
+    const [registerForm] = Form.useForm<RegisterValues>();
 
-    async function handleSubmit(values: FormValues) {
-        const baseUrl = values.baseUrl.trim().replace(/\/+$/, "");
+    // 注册：邮箱验证码相关
+    const [emailVerificationRequired, setEmailVerificationRequired] = useState(false);
+    const [sendingCode, setSendingCode] = useState(false);
+    const [countdown, setCountdown] = useState(0);
+    const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // 进入注册 tab 时拉取后端状态，判断是否需要邮箱验证
+    useEffect(() => {
+        if (tab !== "register") return;
+        const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
+        fetchStatus(baseUrl)
+            .then((status) => setEmailVerificationRequired(!!status.email_verification))
+            .catch(() => { /* 忽略状态拉取失败 */ });
+    }, [tab, loginForm]);
+
+    function startCountdown() {
+        setCountdown(60);
+        countdownRef.current = setInterval(() => {
+            setCountdown((c) => {
+                if (c <= 1) {
+                    clearInterval(countdownRef.current!);
+                    return 0;
+                }
+                return c - 1;
+            });
+        }, 1000);
+    }
+
+    async function handleSendCode() {
+        const email = registerForm.getFieldValue("email") as string | undefined;
+        if (!email) {
+            void message.warning("请先填写邮箱");
+            return;
+        }
+        setSendingCode(true);
+        try {
+            const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
+            await sendVerificationCode(baseUrl, email);
+            void message.success("验证码已发送");
+            startCountdown();
+        } catch (err) {
+            void message.error(err instanceof Error ? err.message : "发送失败");
+        } finally {
+            setSendingCode(false);
+        }
+    }
+
+    async function handleLogin(values: LoginValues) {
+        const baseUrl = getBaseUrl(values.baseUrl || "");
         setLoading(true);
         try {
-            const result =
-                tab === "login"
-                    ? await loginWithPassword(baseUrl, values.username, values.password)
-                    : await registerUser(baseUrl, values.username, values.password);
+            const result = await loginWithPassword(baseUrl, values.username, values.password);
             setSession({ token: result.token, baseUrl, user: result.user });
-            // 把 new-api 作为渠道自动注入 config，用 token 作为 apiKey
             importChannelCredentials({ baseUrl, apiKey: result.token });
-            void message.success(tab === "login" ? "登录成功" : "注册成功");
+            void message.success("登录成功");
             navigate("/");
         } catch (err) {
-            void message.error(err instanceof Error ? err.message : "操作失败，请检查地址和账号信息");
+            void message.error(err instanceof Error ? err.message : "登录失败");
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    async function handleRegister(values: RegisterValues) {
+        if (values.password !== values.confirmPassword) {
+            void message.error("两次密码不一致");
+            return;
+        }
+        const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
+        setLoading(true);
+        try {
+            await registerUser(baseUrl, {
+                username: values.username,
+                password: values.password,
+                email: values.email || undefined,
+                verification_code: values.verificationCode || undefined,
+            });
+            void message.success("注册成功，请登录");
+            setTab("login");
+            loginForm.setFieldValue("username", values.username);
+        } catch (err) {
+            void message.error(err instanceof Error ? err.message : "注册失败");
         } finally {
             setLoading(false);
         }
@@ -61,37 +136,94 @@ export default function AuthPage() {
                         ]}
                         className="mb-2"
                     />
-                    <Form form={form} layout="vertical" onFinish={handleSubmit} requiredMark={false}>
-                        <Form.Item
-                            name="baseUrl"
-                            label="服务地址"
-                            rules={[
-                                { required: true, message: "请填写服务地址" },
-                                {
-                                    validator: (_, value) => {
-                                        try {
-                                            const url = new URL((value || "").trim());
-                                            if (url.protocol === "http:" || url.protocol === "https:") return Promise.resolve();
-                                        } catch {
-                                            // ignore
+
+                    {tab === "login" && (
+                        <Form form={loginForm} layout="vertical" onFinish={handleLogin} requiredMark={false}>
+                            {!import.meta.env.DEV && (
+                                <Form.Item
+                                    name="baseUrl"
+                                    label="服务地址"
+                                    rules={[
+                                        { required: true, message: "请填写服务地址" },
+                                        {
+                                            validator: (_, value) => {
+                                                try {
+                                                    const url = new URL((value || "").trim());
+                                                    if (url.protocol === "http:" || url.protocol === "https:") return Promise.resolve();
+                                                } catch { /* ignore */ }
+                                                return Promise.reject(new Error("请填写有效的 http/https 地址"));
+                                            },
+                                        },
+                                    ]}
+                                >
+                                    <Input placeholder="https://api.example.com" autoComplete="url" />
+                                </Form.Item>
+                            )}
+                            <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请填写用户名" }]}>
+                                <Input placeholder="用户名" autoComplete="username" />
+                            </Form.Item>
+                            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请填写密码" }]}>
+                                <Input.Password placeholder="密码" autoComplete="current-password" />
+                            </Form.Item>
+                            <Button type="primary" htmlType="submit" block loading={loading} className="mt-1">
+                                登录
+                            </Button>
+                        </Form>
+                    )}
+
+                    {tab === "register" && (
+                        <Form form={registerForm} layout="vertical" onFinish={handleRegister} requiredMark={false}>
+                            <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请填写用户名" }]}>
+                                <Input placeholder="用户名" autoComplete="username" />
+                            </Form.Item>
+                            <Form.Item
+                                name="password"
+                                label="密码"
+                                rules={[
+                                    { required: true, message: "请填写密码" },
+                                    { min: 8, message: "密码至少 8 位" },
+                                ]}
+                            >
+                                <Input.Password placeholder="密码（至少 8 位）" autoComplete="new-password" />
+                            </Form.Item>
+                            <Form.Item
+                                name="confirmPassword"
+                                label="确认密码"
+                                rules={[{ required: true, message: "请确认密码" }]}
+                            >
+                                <Input.Password placeholder="再次输入密码" autoComplete="new-password" />
+                            </Form.Item>
+                            <Form.Item
+                                name="email"
+                                label={emailVerificationRequired ? "邮箱（验证必填）" : "邮箱（选填）"}
+                                rules={emailVerificationRequired ? [{ required: true, message: "请填写邮箱" }, { type: "email", message: "请填写有效邮箱" }] : [{ type: "email", message: "请填写有效邮箱" }]}
+                            >
+                                <Input placeholder="name@example.com" type="email" autoComplete="email" />
+                            </Form.Item>
+                            {emailVerificationRequired && (
+                                <Form.Item name="verificationCode" label="邮箱验证码" rules={[{ required: true, message: "请填写验证码" }]}>
+                                    <Input
+                                        placeholder="验证码"
+                                        suffix={
+                                            <Button
+                                                type="link"
+                                                size="small"
+                                                loading={sendingCode}
+                                                disabled={countdown > 0}
+                                                onClick={handleSendCode}
+                                                className="!px-0"
+                                            >
+                                                {countdown > 0 ? `${countdown}s 后重发` : "发送验证码"}
+                                            </Button>
                                         }
-                                        return Promise.reject(new Error("请填写有效的 http/https 地址"));
-                                    },
-                                },
-                            ]}
-                        >
-                            <Input placeholder="https://api.example.com" autoComplete="url" />
-                        </Form.Item>
-                        <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请填写用户名" }]}>
-                            <Input placeholder="username" autoComplete="username" />
-                        </Form.Item>
-                        <Form.Item name="password" label="密码" rules={[{ required: true, message: "请填写密码" }]}>
-                            <Input.Password placeholder="password" autoComplete={tab === "login" ? "current-password" : "new-password"} />
-                        </Form.Item>
-                        <Button type="primary" htmlType="submit" block loading={loading} className="mt-1">
-                            {tab === "login" ? "登录" : "注册"}
-                        </Button>
-                    </Form>
+                                    />
+                                </Form.Item>
+                            )}
+                            <Button type="primary" htmlType="submit" block loading={loading} className="mt-1">
+                                注册
+                            </Button>
+                        </Form>
+                    )}
                 </div>
             </div>
         </div>

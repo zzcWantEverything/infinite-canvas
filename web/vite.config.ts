@@ -50,4 +50,12 @@ export default defineConfig({
         __APP_VERSION__: JSON.stringify(localVersion),
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
+    server: {
+        proxy: {
+            "/api": {
+                target: process.env.VITE_API_BASE || "http://119.45.0.224:3000",
+                changeOrigin: true,
+            },
+        },
+    },
 });
