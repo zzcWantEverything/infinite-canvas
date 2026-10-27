@@ -6,14 +6,11 @@ import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, cre
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
-type LoginValues = { baseUrl: string; username: string; password: string };
-type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };
+// 固定后端地址，生产和开发统一用环境变量，默认指向部署服务器
+const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "http://119.45.0.224:3000").replace(/\/+$/, "");
 
-function getBaseUrl(formBaseUrl: string) {
-    return import.meta.env.DEV
-        ? (import.meta.env.VITE_API_BASE as string || "http://119.45.0.224:3000").replace(/\/+$/, "")
-        : formBaseUrl.trim().replace(/\/+$/, "");
-}
+type LoginValues = { username: string; password: string };
+type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };
 
 export default function AuthPage() {
     const { message } = App.useApp();
@@ -31,23 +28,18 @@ export default function AuthPage() {
     const [countdown, setCountdown] = useState(0);
     const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    // 进入注册 tab 时拉取后端状态，判断是否需要邮箱验证
     useEffect(() => {
         if (tab !== "register") return;
-        const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
-        fetchStatus(baseUrl)
+        fetchStatus(FIXED_BASE_URL)
             .then((status) => setEmailVerificationRequired(!!status.email_verification))
             .catch(() => { /* 忽略状态拉取失败 */ });
-    }, [tab, loginForm]);
+    }, [tab]);
 
     function startCountdown() {
         setCountdown(60);
         countdownRef.current = setInterval(() => {
             setCountdown((c) => {
-                if (c <= 1) {
-                    clearInterval(countdownRef.current!);
-                    return 0;
-                }
+                if (c <= 1) { clearInterval(countdownRef.current!); return 0; }
                 return c - 1;
             });
         }, 1000);
@@ -55,14 +47,10 @@ export default function AuthPage() {
 
     async function handleSendCode() {
         const email = registerForm.getFieldValue("email") as string | undefined;
-        if (!email) {
-            void message.warning("请先填写邮箱");
-            return;
-        }
+        if (!email) { void message.warning("请先填写邮箱"); return; }
         setSendingCode(true);
         try {
-            const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
-            await sendVerificationCode(baseUrl, email);
+            await sendVerificationCode(FIXED_BASE_URL, email);
             void message.success("验证码已发送");
             startCountdown();
         } catch (err) {
@@ -73,23 +61,21 @@ export default function AuthPage() {
     }
 
     async function handleLogin(values: LoginValues) {
-        const baseUrl = getBaseUrl(values.baseUrl || "");
         setLoading(true);
         try {
-            const result = await loginWithPassword(baseUrl, values.username, values.password);
-            setSession({ token: result.token, baseUrl, user: result.user });
-            // 检查是否已有 API Key，没有则自动创建一个默认的
+            const result = await loginWithPassword(FIXED_BASE_URL, values.username, values.password);
+            setSession({ token: result.token, baseUrl: FIXED_BASE_URL, user: result.user });
             try {
-                const tokens = await fetchUserTokens(baseUrl, result.token);
+                const tokens = await fetchUserTokens(FIXED_BASE_URL, result.token);
                 const existingKey = tokens.find((t) => t.key)?.key;
                 if (existingKey) {
-                    importChannelCredentials({ baseUrl, apiKey: existingKey });
+                    importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: existingKey });
                 } else {
-                    const newKey = await createDefaultApiKey(baseUrl, result.token);
-                    importChannelCredentials({ baseUrl, apiKey: newKey || result.token });
+                    const newKey = await createDefaultApiKey(FIXED_BASE_URL, result.token);
+                    importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: newKey || result.token });
                 }
             } catch {
-                importChannelCredentials({ baseUrl, apiKey: result.token });
+                importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: result.token });
             }
             void message.success("登录成功");
             navigate("/");
@@ -101,14 +87,10 @@ export default function AuthPage() {
     }
 
     async function handleRegister(values: RegisterValues) {
-        if (values.password !== values.confirmPassword) {
-            void message.error("两次密码不一致");
-            return;
-        }
-        const baseUrl = getBaseUrl(loginForm.getFieldValue("baseUrl") || "");
+        if (values.password !== values.confirmPassword) { void message.error("两次密码不一致"); return; }
         setLoading(true);
         try {
-            await registerUser(baseUrl, {
+            await registerUser(FIXED_BASE_URL, {
                 username: values.username,
                 password: values.password,
                 email: values.email || undefined,
@@ -151,26 +133,6 @@ export default function AuthPage() {
 
                     {tab === "login" && (
                         <Form form={loginForm} layout="vertical" onFinish={handleLogin} requiredMark={false}>
-                            {!import.meta.env.DEV && (
-                                <Form.Item
-                                    name="baseUrl"
-                                    label="服务地址"
-                                    rules={[
-                                        { required: true, message: "请填写服务地址" },
-                                        {
-                                            validator: (_, value) => {
-                                                try {
-                                                    const url = new URL((value || "").trim());
-                                                    if (url.protocol === "http:" || url.protocol === "https:") return Promise.resolve();
-                                                } catch { /* ignore */ }
-                                                return Promise.reject(new Error("请填写有效的 http/https 地址"));
-                                            },
-                                        },
-                                    ]}
-                                >
-                                    <Input placeholder="https://api.example.com" autoComplete="url" />
-                                </Form.Item>
-                            )}
                             <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请填写用户名" }]}>
                                 <Input placeholder="用户名" autoComplete="username" />
                             </Form.Item>
@@ -188,21 +150,10 @@ export default function AuthPage() {
                             <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请填写用户名" }]}>
                                 <Input placeholder="用户名" autoComplete="username" />
                             </Form.Item>
-                            <Form.Item
-                                name="password"
-                                label="密码"
-                                rules={[
-                                    { required: true, message: "请填写密码" },
-                                    { min: 8, message: "密码至少 8 位" },
-                                ]}
-                            >
+                            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请填写密码" }, { min: 8, message: "密码至少 8 位" }]}>
                                 <Input.Password placeholder="密码（至少 8 位）" autoComplete="new-password" />
                             </Form.Item>
-                            <Form.Item
-                                name="confirmPassword"
-                                label="确认密码"
-                                rules={[{ required: true, message: "请确认密码" }]}
-                            >
+                            <Form.Item name="confirmPassword" label="确认密码" rules={[{ required: true, message: "请确认密码" }]}>
                                 <Input.Password placeholder="再次输入密码" autoComplete="new-password" />
                             </Form.Item>
                             <Form.Item
@@ -217,14 +168,7 @@ export default function AuthPage() {
                                     <Input
                                         placeholder="验证码"
                                         suffix={
-                                            <Button
-                                                type="link"
-                                                size="small"
-                                                loading={sendingCode}
-                                                disabled={countdown > 0}
-                                                onClick={handleSendCode}
-                                                className="!px-0"
-                                            >
+                                            <Button type="link" size="small" loading={sendingCode} disabled={countdown > 0} onClick={handleSendCode} className="!px-0">
                                                 {countdown > 0 ? `${countdown}s 后重发` : "发送验证码"}
                                             </Button>
                                         }
