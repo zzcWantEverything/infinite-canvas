@@ -35,8 +35,9 @@ export const useUserStore = create<UserStore>()(
         {
             name: "infinite-canvas:user_session",
             storage: localForageStorage as Parameters<typeof persist>[1]["storage"],
+            // 只持久化 session，不持久化 hydrated（避免刷新时 hydrated:false 被读回）
+            partialize: (state) => ({ session: state.session }),
             onRehydrateStorage: () => () => {
-                // 必须用 setState 触发 React 重渲染，直接赋值不生效
                 useUserStore.setState({ hydrated: true });
             },
         },
