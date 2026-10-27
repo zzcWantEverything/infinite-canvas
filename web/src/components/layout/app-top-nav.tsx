@@ -1,6 +1,6 @@
-import { Bot, Menu } from "lucide-react";
-import { Button, Tooltip } from "antd";
-import { Link, useLocation } from "react-router-dom";
+import { Bot, LogOut, Menu } from "lucide-react";
+import { App, Button, Tooltip } from "antd";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
@@ -10,13 +10,24 @@ import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function AppTopNav() {
     const { t } = useTranslation();
     const { pathname } = useLocation();
+    const navigate = useNavigate();
+    const { message } = App.useApp();
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const autoConnectRef = useRef(false);
     const agentToken = useAgentStore((state) => state.token);
+    const session = useUserStore((state) => state.session);
+    const clearSession = useUserStore((state) => state.clearSession);
+
+    function handleLogout() {
+        clearSession();
+        void message.success("已退出登录");
+        navigate("/auth");
+    }
     const agentEnabled = useAgentStore((state) => state.enabled);
     const agentConnected = useAgentStore((state) => state.connected);
     const connectAgent = useAgentStore((state) => state.connectAgent);
@@ -83,10 +94,22 @@ export function AppTopNav() {
                         </div>
 
                         <div className="my-auto flex h-9 min-w-0 items-center justify-end gap-2 justify-self-end whitespace-nowrap">
+                            {session ? (
+                                <Tooltip title={`${session.user.display_name || session.user.username}（余额 ${Math.floor(session.user.quota / 500000)} 元）`}>
+                                    <span className="hidden cursor-default select-none truncate text-xs text-stone-500 dark:text-stone-400 sm:block">
+                                        {session.user.display_name || session.user.username}
+                                    </span>
+                                </Tooltip>
+                            ) : null}
                             <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
                                 <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
                             </Tooltip>
                             <UserStatusActions />
+                            {session ? (
+                                <Tooltip title="退出登录">
+                                    <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<LogOut className="size-4" />} onClick={handleLogout} aria-label="退出登录" />
+                                </Tooltip>
+                            ) : null}
                         </div>
                     </div>
                 </header>

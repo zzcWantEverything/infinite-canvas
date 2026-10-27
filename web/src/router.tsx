@@ -1,8 +1,10 @@
 import { createBrowserRouter, Outlet } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
+import { AuthGuard } from "@/components/layout/auth-guard";
 import UserLayout from "@/layouts/user-layout";
 import AssetsPage from "@/pages/assets";
+import AuthPage from "@/pages/auth";
 import CanvasPage from "@/pages/canvas";
 import CanvasProjectPage from "@/pages/canvas/project";
 import ConfigPage from "@/pages/config";
@@ -14,11 +16,17 @@ import VideoPage from "@/pages/video";
 
 export const router = createBrowserRouter([
     {
+        path: "/auth",
+        element: <AuthPage />,
+    },
+    {
         element: (
-            <UserLayout>
-                <AnalyticsTracker />
-                <Outlet />
-            </UserLayout>
+            <AuthGuard>
+                <UserLayout>
+                    <AnalyticsTracker />
+                    <Outlet />
+                </UserLayout>
+            </AuthGuard>
         ),
         children: [
             { path: "/", element: <HomePage /> },
