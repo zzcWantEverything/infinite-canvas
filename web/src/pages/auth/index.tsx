@@ -112,7 +112,7 @@ export default function AuthPage() {
             <div className="w-full max-w-sm">
                 <div className="mb-8 text-center">
                     <img src="/logo.png" alt="画柚" className="mx-auto mb-3 block size-16 object-contain" />
-                    <h1 className="text-xl font-semibold text-foreground">帧果</h1>
+                    <h1 className="text-xl font-semibold text-foreground">画柚</h1>
                 </div>
                 <div className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-700 dark:bg-stone-900">
                     <Tabs
