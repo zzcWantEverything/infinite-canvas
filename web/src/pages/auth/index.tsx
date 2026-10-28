@@ -111,13 +111,7 @@ export default function AuthPage() {
         <div className="flex min-h-dvh items-center justify-center bg-background px-4">
             <div className="w-full max-w-sm">
                 <div className="mb-8 text-center">
-                    <span
-                        className="mx-auto mb-3 block size-10 bg-foreground"
-                        style={{
-                            mask: "url(/logo.svg) center / contain no-repeat",
-                            WebkitMask: "url(/logo.svg) center / contain no-repeat",
-                        }}
-                    />
+                    <img src="/logo.png" alt="画柚" className="mx-auto mb-3 block size-16 object-contain" />
                     <h1 className="text-xl font-semibold text-foreground">帧果</h1>
                 </div>
                 <div className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-700 dark:bg-stone-900">
