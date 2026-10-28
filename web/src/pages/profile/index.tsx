@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { App, Button, Card, Input, Statistic, Tooltip } from "antd";
+import { useCallback, useEffect, useState } from "react";
+import { App, Button, Input, Tooltip } from "antd";
 import { Activity, Copy, BarChart3, WalletCards } from "lucide-react";
 
 import { fetchCurrentUser, fetchAffCode, redeemCode, type NewApiUser } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import { useCopyText } from "@/hooks/use-copy-text";
 
+// FIXED_BASE_URL 与 auth/index.tsx 保持一致
+const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/\/+$/, "");
+
 function formatQuota(quota: number) {
-    // new-api 默认 500000 quota = $1 = ¥7
     return `¥${(quota / 500000).toFixed(2)}`;
 }
 
@@ -21,26 +23,27 @@ export default function ProfilePage() {
     const [affCode, setAffCode] = useState("");
     const copyText = useCopyText();
 
-    const baseUrl = session?.baseUrl ?? "";
     const token = session?.token ?? "";
 
     const fetchUser = useCallback(async () => {
-        if (!baseUrl || !token) return;
+        if (!token) return;
         setLoading(true);
         try {
-            const u = await fetchCurrentUser(baseUrl, token);
+            const u = await fetchCurrentUser(FIXED_BASE_URL, token);
             setUser(u);
         } finally {
             setLoading(false);
         }
-    }, [baseUrl, token]);
+    }, [token]);
 
     useEffect(() => {
         void fetchUser();
-        fetchAffCode(baseUrl, token)
-            .then(setAffCode)
-            .catch(() => {});
-    }, [baseUrl, token, fetchUser]);
+        if (token) {
+            fetchAffCode(FIXED_BASE_URL, token)
+                .then(setAffCode)
+                .catch(() => {});
+        }
+    }, [token, fetchUser]);
 
     async function handleRedeem() {
         if (!redeemInput.trim()) {
@@ -49,7 +52,7 @@ export default function ProfilePage() {
         }
         setRedeeming(true);
         try {
-            const added = await redeemCode(baseUrl, token, redeemInput.trim());
+            const added = await redeemCode(FIXED_BASE_URL, token, redeemInput.trim());
             void message.success(`兑换成功，增加余额 ${formatQuota(added)}`);
             setRedeemInput("");
             void fetchUser();
@@ -60,9 +63,8 @@ export default function ProfilePage() {
         }
     }
 
-    const affLink = affCode
-        ? `${baseUrl.replace(/\/+$/, "")}/sign-up?aff=${affCode}`
-        : "";
+    // 推荐链接需要用真实域名，从 window.location 取当前站点
+    const affLink = affCode ? `${window.location.origin}/sign-up?aff=${affCode}` : "";
 
     return (
         <div className="mx-auto max-w-2xl space-y-5 px-4 py-8">
@@ -127,10 +129,7 @@ export default function ProfilePage() {
                     <div className="flex gap-2">
                         <Input value={affLink} readOnly className="font-mono text-xs" />
                         <Tooltip title="复制推荐链接">
-                            <Button
-                                icon={<Copy className="size-4" />}
-                                onClick={() => copyText(affLink)}
-                            />
+                            <Button icon={<Copy className="size-4" />} onClick={() => copyText(affLink)} />
                         </Tooltip>
                     </div>
                 ) : (
