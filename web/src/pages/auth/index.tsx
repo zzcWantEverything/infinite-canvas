@@ -118,7 +118,7 @@ export default function AuthPage() {
                             WebkitMask: "url(/logo.svg) center / contain no-repeat",
                         }}
                     />
-                    <h1 className="text-xl font-semibold text-foreground">短视频生成平台</h1>
+                    <h1 className="text-xl font-semibold text-foreground">帧果</h1>
                 </div>
                 <div className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-700 dark:bg-stone-900">
                     <Tabs
