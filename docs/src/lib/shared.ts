@@ -1,6 +1,6 @@
 export const appNames = {
   en: 'Infinite Canvas',
-  'zh-CN': '无限画布',
+  'zh-CN': '画柚',
 };
 export const docsRoute = '/docs';
 export const docsContentRoute = '/llms.mdx/docs';
