@@ -155,11 +155,7 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     body.append("model", modelOptionName(model));
     body.append("prompt", prompt);
     body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
-    body.append("size", normalizeVideoSize(config.size, config.vquality) || "1280x720");
-    body.append("resolution_name", normalizeVideoResolution(config.vquality));
-    body.append("generate_audio", String(boolConfig(config.videoGenerateAudio, true)));
-    body.append("watermark", String(boolConfig(config.videoWatermark, false)));
-    body.append("mode", mode);
+    body.append("size", mapVideoSize(normalizeVideoSize(config.size, config.vquality) || "1280x720"));
     if (mode === "frames") {
         if (images[0]) body.append("first_frame", images[0], "first.png");
         if (images[1]) body.append("last_frame", images[1], "last.png");
@@ -312,6 +308,15 @@ function normalizeVideoSeconds(value: string) {
 function resolveVideoMode(mode: string | undefined, imageCount: number) {
     if (mode === "reference" || imageCount > 2) return "reference";
     return "frames";
+}
+
+function mapVideoSize(size: string) {
+    const match = size.match(/^(\d+)x(\d+)$/);
+    if (!match) return "1080x1920";
+    const shorter = Math.min(Number(match[1]), Number(match[2]));
+    if (shorter <= 480) return "480x854";
+    if (shorter <= 720) return "720x1280";
+    return "1080x1920";
 }
 
 function normalizeVideoSize(value: string, resolution?: string) {
