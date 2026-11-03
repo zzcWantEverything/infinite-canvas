@@ -28,7 +28,9 @@ export type VideoModelCapability = {
 };
 
 export function videoModelCapability(model: string): VideoModelCapability | null {
-    return Object.prototype.hasOwnProperty.call(videoModelCapabilities, model) ? videoModelCapabilities[model] : null;
+    // model 可能带渠道前缀 "channelId::modelName"，先剥掉前缀。
+    const name = model.includes("::") ? model.slice(model.lastIndexOf("::") + 2) : model;
+    return Object.prototype.hasOwnProperty.call(videoModelCapabilities, name) ? videoModelCapabilities[name] : null;
 }
 
 export function videoModelPrice(capability: VideoModelCapability, resolution: string, hasReferenceVideo: boolean): VideoModelPrice {

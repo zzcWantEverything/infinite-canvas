@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Slider } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -7,7 +7,7 @@ import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
 import { estimateVideoPrice, videoModelCapability } from "@/config/video-models";
-import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, modelOptionName, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
     { value: "480", label: "480p" },
@@ -43,7 +43,30 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const dimensions = readVideoDimensions(config.size || "auto", resolution, selectedRatio);
     const supportedRatios = capability ? videoRatioOptions.filter((item) => capability.ratios.includes(item.value)) : videoRatioOptions;
     const supportedResolutions = capability ? resolutionOptions.filter((item) => capability.resolutions.includes(item.value)) : resolutionOptions;
-    const price = capability ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
+    const basePrice = capability ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
+
+    // 从 /api/pricing 拉取当前用户的分组倍数，乘入预估价格使其与后端预扣费一致。
+    const [groupRatio, setGroupRatio] = useState<number>(1);
+    useEffect(() => {
+        if (!capability || !config.baseUrl || !config.apiKey) return;
+        const model = modelOptionName(config.videoModel || config.model);
+        const url = withLocalProxy(buildApiUrl(config.baseUrl, "").replace(/\/v1$/, "") + "/api/pricing");
+        fetch(url, { headers: { Authorization: `Bearer ${config.apiKey}` } })
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.success || !data.group_ratio) return;
+                // 找当前用户组的倍数（group_ratio 是 { groupName: ratio } 的对象）；
+                // /api/pricing 只返回当前用户可用的分组，取第一个即当前用户组。
+                const ratios: Record<string, number> = data.group_ratio;
+                const keys = Object.keys(ratios);
+                // 优先取 model 对应的渠道所在组 ratio，简化为取 default 或第一个。
+                const ratio = ratios["default"] ?? ratios[keys[0]] ?? 1;
+                setGroupRatio(ratio);
+            })
+            .catch(() => { /* 拉不到就保持 1，不影响使用 */ });
+    }, [capability, config.baseUrl, config.apiKey, config.videoModel, config.model]);
+
+    const price = basePrice !== null ? basePrice * groupRatio : null;
     const applySize = (nextResolution: string, ratio: string) => {
         onConfigChange("vquality", nextResolution);
         onConfigChange("size", computeVideoSize(nextResolution, ratio));

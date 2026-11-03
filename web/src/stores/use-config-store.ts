@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
+import { videoModelCapability } from "@/config/video-models";
 
 import i18n from "@/i18n";
 
@@ -54,6 +55,7 @@ export type AiConfig = {
     canvasImageCount: string;
     proxyEnabled: boolean;
     proxyUrl: string;
+    imgbedUrl: string;
 };
 
 export type WebdavSyncConfig = {
@@ -63,7 +65,7 @@ export type WebdavSyncConfig = {
     directory: string;
     lastSyncedAt: string;
 };
-export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
+export type ConfigTabKey = "channels" | "local-proxy" | "imgbed" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
 
 export type ChannelCredentialsImportResult = {
     status: "created" | "updated" | "missing-base-url" | "invalid-base-url";
@@ -97,9 +99,9 @@ export const defaultConfig: AiConfig = {
             ],
         },
     ],
-    model: "default::gpt-image-2",
+    model: "default::model-359263564038410254",
     imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
+    videoModel: "default::model-359263564038410254",
     textModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
@@ -121,6 +123,7 @@ export const defaultConfig: AiConfig = {
     canvasImageCount: "3",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
+    imgbedUrl: "http://119.45.0.224:8081",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -398,7 +401,10 @@ export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     if (!decoded) return value;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
-    return channel ? `${decoded.model}（${channel.name}）` : decoded.model;
+    // 如果能力表里有友好名称（如 "Seedance 2.5"），优先显示，再加渠道名区分。
+    const cap = videoModelCapability(decoded.model);
+    const displayName = cap?.label || decoded.model;
+    return channel ? `${displayName}（${channel.name}）` : displayName;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {

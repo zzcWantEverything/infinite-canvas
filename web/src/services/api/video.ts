@@ -77,8 +77,7 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (requestConfig.apiFormat === "gemini") return createGeminiVideoTask(requestConfig, selectedModel, prompt, references, options);
-    if (videoModelCapability(requestConfig.model)?.protocol === "ark") return createArkVideoTask(requestConfig, selectedModel, prompt, references, options);
-    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+    if (videoModelCapability(requestConfig.model)?.protocol === "ark") return createArkVideoTask(requestConfig, selectedModel, prompt, references, options);    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -246,11 +245,10 @@ async function createArkVideoTask(config: AiConfig, model: string, prompt: strin
     if (!capability) throw new Error(apiText("videoModelRequired"));
     if (!references.length && (options?.videos?.length || options?.audios?.length)) throw new Error(apiText("arkReferenceUnsupported"));
     if (references.length > capability.maxImages) throw new Error(apiText("arkReferenceImageLimit", { count: capability.maxImages }));
-    // Ark 的 content 只接受公网 URL，本地 blob 地址上游访问不到。
+    // Ark 的 content 只接受公网 URL：本地 blob/data 图片先上传到图床，已是公网 URL 的直接用。
     const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
     for (const image of references) {
-        const url = publicReferenceUrl(image);
-        if (!url) throw new Error(apiText("arkReferenceNeedsPublicUrl"));
+        const url = await resolveArkReferenceUrl(config, image);
         content.push({ type: "image_url", image_url: { url }, role: "reference_image" });
     }
     const resolution = normalizeResolutionTier(capability, config.vquality);
@@ -282,10 +280,37 @@ async function pollArkVideoTask(config: AiConfig, task: VideoGenerationTask, opt
     }
 }
 
-/** Ark 的路径挂在 new-api 的原生插件路由下，不走 /v1。 */
 function arkVideoUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
     const baseUrl = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
     return withLocalProxy(`${baseUrl}/doubao/api/v3${path}`);
+}
+
+/** 把本地参考图上传到图床并返回公网 URL；已经是 http(s) 的直接返回。 */
+async function resolveArkReferenceUrl(config: AiConfig, image: ReferenceImage): Promise<string> {
+    const candidate = image.url || image.dataUrl || "";
+    if (/^https?:\/\//i.test(candidate)) return candidate;
+
+    const imgbedUrl = (config.imgbedUrl || "").trim().replace(/\/+$/, "");
+    if (!imgbedUrl) throw new Error(apiText("arkReferenceNeedsPublicUrl"));
+
+    // 从 IndexedDB / dataUrl 拿到 Blob，然后 POST 到图床。
+    let blob: Blob | null = null;
+    if (image.storageKey) blob = await getMediaBlob(image.storageKey);
+    if (!blob && candidate.startsWith("data:")) blob = await (await fetch(candidate)).blob();
+    if (!blob && candidate.startsWith("blob:")) blob = await (await fetch(candidate)).blob();
+    if (!blob) throw new Error(apiText("referenceImageReadFailed"));
+
+    const form = new FormData();
+    const ext = blob.type.split("/")[1] || "png";
+    form.append("file", blob, `ref.${ext}`);
+
+    const resp = await fetch(withLocalProxy(`${imgbedUrl}/upload`), { method: "POST", body: form });
+    if (!resp.ok) throw new Error(apiText("arkUploadFailed", { status: resp.status }));
+    const json = await resp.json();
+    if (!json.url) throw new Error(apiText("arkUploadFailed", { status: 0 }));
+
+    // 图床返回的是相对路径 /public/xxx.png，加上 imgbed 地址变成完整 URL。
+    return /^https?:\/\//i.test(json.url) ? json.url : `${imgbedUrl}${json.url}`;
 }
 
 function publicReferenceUrl(image: ReferenceImage) {
