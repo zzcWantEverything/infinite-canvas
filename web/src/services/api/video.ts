@@ -3,7 +3,8 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
-import { clampVideoSeconds, computeVideoSize, inferVideoRatio } from "@/lib/media-size";
+import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution } from "@/lib/media-size";
+import { estimateVideoPrice, videoModelCapability, type VideoModelCapability } from "@/config/video-models";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
@@ -19,7 +20,7 @@ type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin" | "ark"; model: string };
 type GeminiInlineData = { bytesBase64Encoded: string; mimeType: string };
 type GeminiVideoOperation = {
     name?: string;
@@ -76,6 +77,7 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (requestConfig.apiFormat === "gemini") return createGeminiVideoTask(requestConfig, selectedModel, prompt, references, options);
+    if (videoModelCapability(requestConfig.model)?.protocol === "ark") return createArkVideoTask(requestConfig, selectedModel, prompt, references, options);
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
@@ -87,6 +89,7 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (task.provider === "gemini") return pollGeminiVideoTask(requestConfig, task, options);
+    if (task.provider === "ark") return pollArkVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -148,22 +151,13 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
     const images = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    const videos = await Promise.all((options?.videos || []).map((video) => referenceMediaToFile(video, "ref.mp4", "invalidReferenceVideo", options)));
-    const audios = await Promise.all((options?.audios || []).map((audio) => referenceMediaToFile(audio, "ref.mp3", "invalidReferenceAudio", options)));
-    const mode = resolveVideoMode(config.videoMode, images.length);
     const body = new FormData();
     body.append("model", modelOptionName(model));
     body.append("prompt", prompt);
     body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
     body.append("size", mapVideoSize(normalizeVideoSize(config.size, config.vquality) || "1280x720"));
-    if (mode === "frames") {
-        if (images[0]) body.append("first_frame", images[0], "first.png");
-        if (images[1]) body.append("last_frame", images[1], "last.png");
-    } else {
-        images.forEach((file) => body.append("image[]", file, "ref.png"));
-    }
-    videos.forEach((file) => body.append("video[]", file));
-    audios.forEach((file) => body.append("audio[]", file));
+    // 上游只支持 input_reference（单文件），不支持 first_frame/last_frame/image[]/video[]/audio[]
+    if (images[0]) body.append("input_reference", images[0], "ref.png");
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
@@ -245,6 +239,72 @@ async function pollGeminiVideoTask(config: AiConfig, task: VideoGenerationTask, 
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
+}
+
+async function createArkVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
+    const capability = videoModelCapability(model);
+    if (!capability) throw new Error(apiText("videoModelRequired"));
+    if (!references.length && (options?.videos?.length || options?.audios?.length)) throw new Error(apiText("arkReferenceUnsupported"));
+    if (references.length > capability.maxImages) throw new Error(apiText("arkReferenceImageLimit", { count: capability.maxImages }));
+    // Ark 的 content 只接受公网 URL，本地 blob 地址上游访问不到。
+    const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
+    for (const image of references) {
+        const url = publicReferenceUrl(image);
+        if (!url) throw new Error(apiText("arkReferenceNeedsPublicUrl"));
+        content.push({ type: "image_url", image_url: { url }, role: "reference_image" });
+    }
+    const resolution = normalizeResolutionTier(capability, config.vquality);
+    const seconds = clampArkSeconds(capability, config.videoSeconds);
+    try {
+        const created = unwrapEnvelope((await axios.post<ApiEnvelope<VideoResponse>>(arkVideoUrl(config, "/contents/generations/tasks"), {
+            model: modelOptionName(model),
+            content,
+            duration: seconds,
+            ratio: capability.ratios.includes(videoAspectRatio(config.size)) ? videoAspectRatio(config.size) : capability.ratios[0],
+            resolution: `${resolution}p`,
+        }, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data, apiText("noVideoTask"));
+        if (!created?.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "ark", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollArkVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const state = unwrapEnvelope((await axios.get<ApiEnvelope<VideoResponse>>(arkVideoUrl(config, `/contents/generations/tasks/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data, apiText("videoTaskQueryFailed"));
+        const url = videoResultUrl(state);
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: readApiErrorMessage(state.error?.message) || apiText("videoGenerationFailed") };
+        return { status: "pending" };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
+}
+
+/** Ark 的路径挂在 new-api 的原生插件路由下，不走 /v1。 */
+function arkVideoUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
+    const baseUrl = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
+    return withLocalProxy(`${baseUrl}/doubao/api/v3${path}`);
+}
+
+function publicReferenceUrl(image: ReferenceImage) {
+    const candidate = image.url || image.dataUrl || "";
+    return /^https?:\/\//i.test(candidate) ? candidate : "";
+}
+
+function normalizeResolutionTier(capability: VideoModelCapability, value: string) {
+    const tier = parseVideoResolution(value);
+    if (capability.resolutions.includes(tier)) return tier;
+    return capability.resolutions[capability.resolutions.length - 1];
+}
+
+function clampArkSeconds(capability: VideoModelCapability, value: string) {
+    const step = capability.seconds.step || 1;
+    const requested = Math.floor(Number(value) || capability.defaultSeconds);
+    const bounded = Math.min(capability.seconds.max, Math.max(capability.seconds.min, requested));
+    const steps = Math.round((bounded - capability.seconds.min) / step);
+    return capability.seconds.min + steps * step;
 }
 
 function assertVideoConfig(config: AiConfig, model: string) {

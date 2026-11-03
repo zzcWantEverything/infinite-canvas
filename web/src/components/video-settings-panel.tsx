@@ -6,7 +6,8 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
-import { type AiConfig } from "@/stores/use-config-store";
+import { estimateVideoPrice, videoModelCapability } from "@/config/video-models";
+import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
     { value: "480", label: "480p" },
@@ -32,11 +33,17 @@ type VideoSettingsPanelProps = {
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
-    const seconds = Number(clampVideoSeconds(config.videoSeconds || "6"));
+    // 火山格式的模型各自限制尺寸、时长和参考素材，面板按当前模型的能力渲染；其他模型沿用全局范围。
+    const capability = videoModelCapability(modelOptionName(config.videoModel || config.model));
+    const secondsRange = capability ? { min: capability.seconds.min, max: capability.seconds.max, step: capability.seconds.step || 1 } : { min: VIDEO_SECONDS_MIN, max: VIDEO_SECONDS_MAX, step: 1 };
+    const seconds = capability ? clampRangeSeconds(capability, config.videoSeconds) : Number(clampVideoSeconds(config.videoSeconds || "6"));
     const videoMode = normalizeVideoModeValue(config.videoMode);
     const resolution = parseVideoResolution(config.vquality);
     const selectedRatio = inferVideoRatio(config.size || "auto");
     const dimensions = readVideoDimensions(config.size || "auto", resolution, selectedRatio);
+    const supportedRatios = capability ? videoRatioOptions.filter((item) => capability.ratios.includes(item.value)) : videoRatioOptions;
+    const supportedResolutions = capability ? resolutionOptions.filter((item) => capability.resolutions.includes(item.value)) : resolutionOptions;
+    const price = capability ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
     const applySize = (nextResolution: string, ratio: string) => {
         onConfigChange("vquality", nextResolution);
         onConfigChange("size", computeVideoSize(nextResolution, ratio));
@@ -52,12 +59,12 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {resolutionOptions.map((item) => (
+                        {supportedResolutions.map((item) => (
                             <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => selectResolution(item.value)}>
                                 {item.label}
                             </OptionPill>
                         ))}
-                        <ResolutionInput value={resolution} theme={theme} onChange={selectResolution} />
+                        {capability ? null : <ResolutionInput value={resolution} theme={theme} onChange={selectResolution} />}
                     </div>
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
@@ -69,7 +76,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.ratio")} color={theme.node.muted}>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {videoRatioOptions.map((item) => (
+                        {supportedRatios.map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -86,20 +93,28 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="flex items-center gap-3" onMouseDown={(event) => event.stopPropagation()}>
-                        <Slider className="min-w-0 flex-1" min={VIDEO_SECONDS_MIN} max={VIDEO_SECONDS_MAX} step={1} value={seconds} onChange={(value) => onConfigChange("videoSeconds", String(Array.isArray(value) ? value[0] : value))} />
-                        <SecondsInput value={seconds} theme={theme} onCommit={(value) => onConfigChange("videoSeconds", String(value))} />
+                        <Slider className="min-w-0 flex-1" min={secondsRange.min} max={secondsRange.max} step={secondsRange.step} value={seconds} onChange={(value) => onConfigChange("videoSeconds", String(Array.isArray(value) ? value[0] : value))} />
+                        <SecondsInput value={seconds} min={secondsRange.min} max={secondsRange.max} theme={theme} onCommit={(value) => onConfigChange("videoSeconds", String(value))} />
                         <span className="shrink-0 text-sm" style={{ color: theme.node.muted }}>s</span>
                     </div>
                 </SettingGroup>
-                <SettingGroup title={t("settingsPanels.video.mode")} color={theme.node.muted}>
-                    <div className="grid grid-cols-2 gap-2.5">
-                        {videoModeOptions.map((item) => (
-                            <OptionPill key={item.value} selected={videoMode === item.value} theme={theme} onClick={() => onConfigChange("videoMode", item.value)}>
-                                {t(`settingsPanels.video.modes.${item.labelKey}`)}
-                            </OptionPill>
-                        ))}
-                    </div>
-                </SettingGroup>
+                {capability ? (
+                    <SettingGroup title={t("settingsPanels.video.estimatedPrice")} color={theme.node.muted}>
+                        <div className="text-sm" style={{ color: theme.node.text }}>
+                            {price === null ? "-" : `≈ $${price.toFixed(4)}`}
+                        </div>
+                    </SettingGroup>
+                ) : (
+                    <SettingGroup title={t("settingsPanels.video.mode")} color={theme.node.muted}>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            {videoModeOptions.map((item) => (
+                                <OptionPill key={item.value} selected={videoMode === item.value} theme={theme} onClick={() => onConfigChange("videoMode", item.value)}>
+                                    {t(`settingsPanels.video.modes.${item.labelKey}`)}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                )}
             </div>
         </ImageSettingsTheme>
     );
@@ -173,9 +188,16 @@ function ResolutionInput({ value, theme, onChange }: { value: string; theme: Can
     );
 }
 
-function SecondsInput({ value, theme, onCommit }: { value: number; theme: CanvasTheme; onCommit: (value: number) => void }) {
+function clampRangeSeconds(capability: { seconds: { min: number; max: number; step?: number }; defaultSeconds: number }, value: string) {
+    const step = capability.seconds.step || 1;
+    const requested = Math.floor(Number(value) || capability.defaultSeconds);
+    const bounded = Math.min(capability.seconds.max, Math.max(capability.seconds.min, requested));
+    return capability.seconds.min + Math.round((bounded - capability.seconds.min) / step) * step;
+}
+
+function SecondsInput({ value, min, max, theme, onCommit }: { value: number; min: number; max: number; theme: CanvasTheme; onCommit: (value: number) => void }) {
     const commit = (input: HTMLInputElement) => {
-        const next = Number(clampVideoSeconds(input.value));
+        const next = Math.min(max, Math.max(min, Math.floor(Number(input.value) || min)));
         input.value = String(next);
         onCommit(next);
     };
@@ -184,8 +206,8 @@ function SecondsInput({ value, theme, onCommit }: { value: number; theme: Canvas
         <label className="flex h-9 w-[68px] shrink-0 overflow-hidden rounded-xl text-sm" style={{ background: theme.node.fill, color: theme.node.text }}>
             <input
                 type="number"
-                min={VIDEO_SECONDS_MIN}
-                max={VIDEO_SECONDS_MAX}
+                min={min}
+                max={max}
                 className="min-w-0 flex-1 bg-transparent px-2 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 defaultValue={value}
                 key={value}
