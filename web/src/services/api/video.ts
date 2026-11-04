@@ -20,7 +20,7 @@ type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin" | "ark"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin" | "ark" | "qora"; model: string };
 type GeminiInlineData = { bytesBase64Encoded: string; mimeType: string };
 type GeminiVideoOperation = {
     name?: string;
@@ -77,7 +77,9 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (requestConfig.apiFormat === "gemini") return createGeminiVideoTask(requestConfig, selectedModel, prompt, references, options);
-    if (videoModelCapability(requestConfig.model)?.protocol === "ark") return createArkVideoTask(requestConfig, selectedModel, prompt, references, options);    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+    if (videoModelCapability(requestConfig.model)?.protocol === "ark") return createArkVideoTask(requestConfig, selectedModel, prompt, references, options);
+    if (videoModelCapability(requestConfig.model)?.protocol === "qora") return createQoraVideoTask(requestConfig, selectedModel, prompt, references, options);
+    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -89,6 +91,7 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     assertVideoConfig(requestConfig, requestConfig.model);
     if (task.provider === "gemini") return pollGeminiVideoTask(requestConfig, task, options);
     if (task.provider === "ark") return pollArkVideoTask(requestConfig, task, options);
+    if (task.provider === "qora") return pollQoraVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -283,6 +286,52 @@ async function pollArkVideoTask(config: AiConfig, task: VideoGenerationTask, opt
 function arkVideoUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
     const baseUrl = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
     return withLocalProxy(`${baseUrl}/doubao/api/v3${path}`);
+}
+
+// Qora: 走 new-api 的 /v1/videos（multipart），由 Qora 插件（Task Plugin 61）处理。
+// new-api 识别 route_id 前缀（qr-v*）路由到 channel #8。
+// Qora 走 new-api 的 /v1/videos，baseUrl 已含 /v1 不能用 aiApiUrl（会再加 /v1）。
+function qoraApiUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
+    const baseUrl = config.baseUrl.trim().replace(/\/+$/, "");
+    // 如果 baseUrl 已经以 /v1 结尾（如 https://qorastudio.cn/api/v1），直接拼路径。
+    // 否则走 buildApiUrl 补 /v1。
+    if (/\/v1$/i.test(baseUrl)) return withLocalProxy(`${baseUrl}${path}`);
+    return buildApiUrl(baseUrl, path);
+}
+
+async function createQoraVideoTask(config: AiConfig, model: string, prompt: string, _references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
+    const capability = videoModelCapability(model);
+    const rawModel = modelOptionName(model);
+    const seconds = capability ? String(clampArkSeconds(capability, config.videoSeconds)) : normalizeVideoSeconds(config.videoSeconds);
+    const resolution = capability ? normalizeResolutionTier(capability, config.vquality) : parseVideoResolution(config.vquality);
+    const ratio = videoAspectRatio(config.size);
+    const body = new FormData();
+    body.append("model", rawModel);
+    body.append("prompt", prompt);
+    body.append("seconds", seconds);
+    body.append("size", `${resolution}p`);
+    body.append("metadata", JSON.stringify({ resolution: `${resolution}p`, ratio, duration: Number(seconds) }));
+    try {
+        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(qoraApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "qora", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollQoraVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(qoraApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        const url = videoResultUrl(video);
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (video.status === "failed" || video.status === "cancelled" || video.status === "FAILURE") {
+            return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+        }
+        return { status: "pending" };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
 }
 
 /** 把本地参考图上传到图床并返回公网 URL；已经是 http(s) 的直接返回。 */

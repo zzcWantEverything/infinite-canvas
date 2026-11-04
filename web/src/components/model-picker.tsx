@@ -6,6 +6,8 @@ import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { useUserStore } from "@/stores/use-user-store";
+import { fetchUserVideoModels } from "@/services/api/auth";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -22,7 +24,22 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
-    const options = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+    const session = useUserStore((state) => state.session);
+
+    // 视频模型直接从服务器拉取，其他能力保留原来的配置逻辑。
+    const [serverVideoModels, setServerVideoModels] = useState<string[]>([]);
+    useEffect(() => {
+        if (capability !== "video" || !session?.baseUrl || !session?.token) return;
+        fetchUserVideoModels(session.baseUrl, session.token)
+            .then(setServerVideoModels)
+            .catch(() => { /* 拉取失败静默处理，降级到配置列表 */ });
+    }, [capability, session?.baseUrl, session?.token]);
+
+    const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+
+    // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
+    const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels : configOptions;
+
     const current = value || "";
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 

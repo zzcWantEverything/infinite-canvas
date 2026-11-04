@@ -50,7 +50,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     useEffect(() => {
         if (!capability || !config.baseUrl || !config.apiKey) return;
         const model = modelOptionName(config.videoModel || config.model);
-        const url = withLocalProxy(buildApiUrl(config.baseUrl, "").replace(/\/v1$/, "") + "/api/pricing");
+        const rawBase = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
+        const origin = rawBase.replace(/:\d+$/, "");
+        const url = withLocalProxy(origin + "/api/pricing");
         fetch(url, { headers: { Authorization: `Bearer ${config.apiKey}` } })
             .then((r) => r.json())
             .then((data) => {

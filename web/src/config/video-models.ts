@@ -5,12 +5,15 @@
 // price for models billed per request. Nothing here reaches the gateway: the
 // UI uses it to offer only valid options and to estimate the charge.
 
-export type VideoProtocol = "ark" | "openai";
+export type VideoProtocol = "ark" | "openai" | "qora";
 
 export type VideoModelPrice =
     | { kind: "per_token"; noReference: number; withReference: number }
-    | { kind: "per_call"; price: number };
+    | { kind: "per_call"; price: number }
+    | { kind: "per_second"; pricePerSecond: number };
 
+// Qora per-second price type (credits/second, 10 credits = ¥1 = $0.14 approx)
+// We store the price in CNY/second for display; billing expressions use raw credits.
 export type VideoModelCapability = {
     label: string;
     protocol: VideoProtocol;
@@ -23,7 +26,7 @@ export type VideoModelCapability = {
     maxImages: number;
     maxVideos: number;
     maxAudios: number;
-    /** Prices by resolution tier, per million tokens or per call. */
+    /** Prices by resolution tier, per call. */
     price: Record<string, VideoModelPrice> & { default?: VideoModelPrice };
 };
 
@@ -56,6 +59,7 @@ const tierMaxPixels: Record<string, [number, number]> = {
 export function estimateVideoPrice(capability: VideoModelCapability, options: { seconds: number; resolution: string; hasReferenceVideo: boolean }) {
     const price = videoModelPrice(capability, options.resolution, options.hasReferenceVideo);
     if (price.kind === "per_call") return price.price;
+    if (price.kind === "per_second") return price.pricePerSecond * options.seconds;
     const size = tierMaxPixels[options.resolution] || tierMaxPixels["720"];
     const unit = options.hasReferenceVideo ? price.withReference : price.noReference;
     return (estimateVideoTokens(options.seconds, size[0], size[1]) * unit) / 1_000_000;
@@ -149,5 +153,108 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
         maxVideos: 0,
         maxAudios: 0,
         price: { "720": { kind: "per_call", price: 1.65 } },
+    },
+    // ── Qora models ──────────────────────────────────────────────────────────
+    // Prices are in CNY (积分/条 or 积分/秒); 10 credits = ¥1.
+    // Per-call models: price in CNY.  Per-second models: pricePerSecond in CNY/s.
+    "qr-v042": {
+        label: "Seedance 2.5 · 骨折版满血10图",
+        protocol: "qora",
+        resolutions: ["720", "1080"],
+        ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        seconds: { min: 30, max: 30 },
+        defaultSeconds: 30,
+        maxImages: 10, maxVideos: 0, maxAudios: 0,
+        price: { "720": { kind: "per_call", price: 5.5 }, "1080": { kind: "per_call", price: 7.0 } },
+    },
+    "qr-v040": {
+        label: "Seedance 2.0 · 满血按条（480p）",
+        protocol: "qora",
+        resolutions: ["480"],
+        ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        seconds: { min: 4, max: 15 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 3, maxAudios: 3,
+        price: { default: { kind: "per_call", price: 3.0 } },
+    },
+    "qr-v035": {
+        label: "Seedance 2.0 Fast · 短片特惠",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        seconds: { min: 10, max: 10 },
+        defaultSeconds: 10,
+        maxImages: 9, maxVideos: 0, maxAudios: 0,
+        price: { default: { kind: "per_call", price: 1.5 } },
+    },
+    "qr-v036": {
+        label: "Seedance 2.0 Fast · 按条特惠",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["16:9", "9:16"],
+        seconds: { min: 5, max: 15, step: 5 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 0, maxAudios: 0,
+        price: { default: { kind: "per_call", price: 2.5 } },
+    },
+    "qr-v037": {
+        label: "Seedance 2.0 · 满血按条",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        seconds: { min: 4, max: 15 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 9, maxAudios: 9,
+        price: { default: { kind: "per_call", price: 3.9 } },
+    },
+    "qr-v007": {
+        label: "Seedance 2.5 · 特惠官方480p",
+        protocol: "qora",
+        resolutions: ["480"],
+        ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        seconds: { min: 4, max: 30 },
+        defaultSeconds: 5,
+        maxImages: 30, maxVideos: 10, maxAudios: 10,
+        price: { default: { kind: "per_second", pricePerSecond: 0.35 } },
+    },
+    "qr-v012": {
+        label: "Seedance 2.5 · 原生720",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["16:9", "9:16", "4:3", "3:4", "1:1"],
+        seconds: { min: 4, max: 30 },
+        defaultSeconds: 5,
+        maxImages: 30, maxVideos: 0, maxAudios: 10,
+        price: { default: { kind: "per_second", pricePerSecond: 0.45 } },
+    },
+    "qr-v018": {
+        label: "Seedance 2.0 · 竖屏特惠",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["9:16"],
+        seconds: { min: 4, max: 15 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 3, maxAudios: 3,
+        price: { default: { kind: "per_second", pricePerSecond: 0.2 } },
+    },
+    "qr-v019": {
+        label: "Seedance 2.0 Mini 竖屏特惠",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["9:16"],
+        seconds: { min: 4, max: 15 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 3, maxAudios: 3,
+        price: { default: { kind: "per_second", pricePerSecond: 0.1 } },
+    },
+    "qr-v020": {
+        label: "Seedance 2.0 Fast 竖屏特惠",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["9:16"],
+        seconds: { min: 4, max: 15 },
+        defaultSeconds: 5,
+        maxImages: 9, maxVideos: 3, maxAudios: 3,
+        price: { default: { kind: "per_second", pricePerSecond: 0.15 } },
     },
 };

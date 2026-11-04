@@ -102,6 +102,14 @@ export async function fetchUserTokens(baseUrl: string, token: string): Promise<{
     return res.data.data ?? [];
 }
 
+export async function fetchUserVideoModels(baseUrl: string, token: string): Promise<string[]> {
+    const res = await axios.get<{ success: boolean; data?: string[] | null }>(
+        authApiUrl(baseUrl, "/api/user/models"),
+        { headers: { Authorization: `Bearer ${token}` } },
+    );
+    return res.data.data ?? [];
+}
+
 export async function createDefaultApiKey(baseUrl: string, token: string): Promise<string> {
     const res = await axios.post<{ success: boolean; message?: string; data?: { key?: string } | null }>(
         authApiUrl(baseUrl, "/api/token/"),
