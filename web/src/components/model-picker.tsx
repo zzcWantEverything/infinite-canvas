@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { encodeChannelModel, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
 
@@ -26,13 +26,19 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const [open, setOpen] = useState(false);
     const session = useUserStore((state) => state.session);
 
-    // 视频模型直接从服务器拉取，其他能力保留原来的配置逻辑。
+    // 视频模型直接从服务器拉取，并用当前渠道 id 编码，确保 resolveModelChannel 能找到有效凭据。
     const [serverVideoModels, setServerVideoModels] = useState<string[]>([]);
     useEffect(() => {
         if (capability !== "video" || !session?.baseUrl || !session?.token) return;
         fetchUserVideoModels(session.baseUrl, session.token)
-            .then(setServerVideoModels)
+            .then((models) => {
+                // 找到 baseUrl 匹配的渠道 id，编码为 channelId::model。
+                const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, session.baseUrl));
+                const channelId = matchingChannel?.id ?? config.channels[0]?.id ?? "default";
+                setServerVideoModels(models.map((m) => encodeChannelModel(channelId, m)));
+            })
             .catch(() => { /* 拉取失败静默处理，降级到配置列表 */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [capability, session?.baseUrl, session?.token]);
 
     const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
@@ -56,7 +62,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             open={open}
             value={current}
             onOpenChange={(nextOpen) => {
-                if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
+                // 视频能力：服务器已提供模型列表时不触发配置弹窗；其他能力保留原逻辑。
+                if (nextOpen && !options.length && config.channelMode === "local" && capability !== "video") onMissingConfig?.();
                 if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                 setOpen(nextOpen);
             }}

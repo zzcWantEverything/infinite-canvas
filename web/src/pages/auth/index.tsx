@@ -6,9 +6,12 @@ import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, cre
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
-// 开发环境走 vite proxy（相对路径），生产走 nginx 反向代理（也是相对路径）
-// 如需直连远端可设 VITE_API_BASE，但通常保持空让 nginx 代理
+// 开发环境走 vite proxy，生产走 nginx 反向代理。
+// VITE_API_BASE 未设时用 window.location.origin，确保 importChannelCredentials 和 session 有非空 baseUrl。
 const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/\/+$/, "");
+function getEffectiveBaseUrl() {
+    return FIXED_BASE_URL || (typeof window !== "undefined" ? window.location.origin : "");
+}
 
 type LoginValues = { username: string; password: string };
 type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };
@@ -64,19 +67,20 @@ export default function AuthPage() {
     async function handleLogin(values: LoginValues) {
         setLoading(true);
         try {
+            const effectiveBaseUrl = getEffectiveBaseUrl();
             const result = await loginWithPassword(FIXED_BASE_URL, values.username, values.password);
-            setSession({ token: result.token, baseUrl: FIXED_BASE_URL, user: result.user });
+            setSession({ token: result.token, baseUrl: effectiveBaseUrl, user: result.user });
             try {
-                const tokens = await fetchUserTokens(FIXED_BASE_URL, result.token);
+                const tokens = await fetchUserTokens(effectiveBaseUrl, result.token);
                 const existingKey = tokens.find((t) => t.key)?.key;
                 if (existingKey) {
-                    importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: existingKey });
+                    importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: existingKey });
                 } else {
-                    const newKey = await createDefaultApiKey(FIXED_BASE_URL, result.token);
-                    importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: newKey || result.token });
+                    const newKey = await createDefaultApiKey(effectiveBaseUrl, result.token);
+                    importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: newKey || result.token });
                 }
             } catch {
-                importChannelCredentials({ baseUrl: FIXED_BASE_URL, apiKey: result.token });
+                importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: result.token });
             }
             void message.success("登录成功");
             navigate("/");

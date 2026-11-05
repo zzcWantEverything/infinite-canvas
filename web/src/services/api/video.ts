@@ -288,6 +288,93 @@ function arkVideoUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
     return withLocalProxy(`${baseUrl}/doubao/api/v3${path}`);
 }
 
+// ── Qora asset upload (3-step: authorize → OSS direct → complete) ──────────
+// new-api proxies steps 1 & 3 at POST /api/qora-assets (adds channel Qora key).
+// Step 2 (file → OSS) goes directly from the browser to Aliyun OSS – no auth.
+
+type QoraAuthorizeResp = { status: "uploading"; id: string; host: string; upload_mode: string; fields: Record<string, string> } | { status: "ready"; id: string };
+type QoraCompleteResp = { status: "ready"; id: string };
+
+function qoraAssetsProxyUrl(config: Pick<AiConfig, "baseUrl">) {
+    const base = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
+    return `${base}/api/qora-assets`;
+}
+
+/** Upload one file to Qora's OSS and return the asset id. */
+async function qoraUploadAsset(config: AiConfig, blob: Blob, mimeType: string, signal?: AbortSignal): Promise<string> {
+    // 1. Compute SHA-256 of the file.
+    const arrayBuf = await blob.arrayBuffer();
+    const hashBuf = await crypto.subtle.digest("SHA-256", arrayBuf);
+    const source = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    // 2. Authorize via new-api proxy.
+    const authRes = await fetch(qoraAssetsProxyUrl(config), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ action: "authorize", source, size: blob.size, type: mimeType }),
+        signal,
+    });
+    if (!authRes.ok) throw new Error(apiText("arkUploadFailed", { status: authRes.status }));
+    const authData = (await authRes.json()) as QoraAuthorizeResp;
+
+    if (authData.status === "ready") return authData.id;
+
+    // Sanity-check the OSS host stays on Aliyun.
+    const ossHost = new URL(authData.host);
+    if (!ossHost.hostname.endsWith("aliyuncs.com")) throw new Error("Unexpected Qora OSS host");
+
+    // 3. Upload directly to OSS (no Qora key – must not forward it).
+    const form = new FormData();
+    for (const [k, v] of Object.entries(authData.fields)) form.append(k, v);
+    form.append("file", blob, "ref");
+    const ossRes = await fetch(ossHost.origin, { method: "POST", body: form, signal });
+    if (!ossRes.ok && ossRes.status !== 204) {
+        // OSS returns 204 No Content on success.
+        const txt = await ossRes.text().catch(() => "");
+        if (ossRes.status !== 204) throw new Error(apiText("arkUploadFailed", { status: ossRes.status }) + " " + txt.slice(0, 80));
+    }
+
+    // 4. Complete via new-api proxy.
+    const completeRes = await fetch(qoraAssetsProxyUrl(config), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ action: "complete", id: authData.id }),
+        signal,
+    });
+    if (!completeRes.ok) throw new Error(apiText("arkUploadFailed", { status: completeRes.status }));
+    const completeData = (await completeRes.json()) as QoraCompleteResp;
+    if (completeData.status !== "ready") throw new Error("Qora asset not ready after complete");
+    return completeData.id;
+}
+
+/** Upload a ReferenceImage to Qora and return {id, role}. */
+async function qoraUploadImageRef(config: AiConfig, image: ReferenceImage, role: string, signal?: AbortSignal): Promise<{ id: string; role: string }> {
+    let blob: Blob | null = null;
+    if (image.storageKey) blob = await getMediaBlob(image.storageKey);
+    const candidate = image.url || image.dataUrl || "";
+    if (!blob && candidate.startsWith("data:")) blob = await (await fetch(candidate)).blob();
+    if (!blob && /^https?:\/\//i.test(candidate)) blob = await (await fetch(withLocalProxy(candidate), { signal })).blob();
+    if (!blob) throw new Error(apiText("referenceImageReadFailed"));
+    const mimeType = blob.type || "image/png";
+    const id = await qoraUploadAsset(config, blob, mimeType, signal);
+    return { id, role };
+}
+
+/** Upload a ReferenceVideo to Qora and return {id, role}. */
+async function qoraUploadVideoRef(config: AiConfig, video: ReferenceVideo, role: string, signal?: AbortSignal): Promise<{ id: string; role: string }> {
+    let blob: Blob | null = null;
+    if (video.storageKey) blob = await getMediaBlob(video.storageKey);
+    if (!blob) {
+        const url = video.storageKey ? await resolveMediaUrl(video.storageKey, video.url || "") : video.url || "";
+        if (!url) throw new Error(apiText("invalidReferenceVideo"));
+        blob = await (await fetch(withLocalProxy(url), { signal })).blob();
+    }
+    if (!blob?.size) throw new Error(apiText("invalidReferenceVideo"));
+    const mimeType = blob.type || "video/mp4";
+    const id = await qoraUploadAsset(config, blob, mimeType, signal);
+    return { id, role };
+}
+
 // Qora: 走 new-api 的 /v1/videos（multipart），由 Qora 插件（Task Plugin 61）处理。
 // new-api 识别 route_id 前缀（qr-v*）路由到 channel #8。
 // Qora 走 new-api 的 /v1/videos，baseUrl 已含 /v1 不能用 aiApiUrl（会再加 /v1）。
@@ -299,18 +386,32 @@ function qoraApiUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
     return buildApiUrl(baseUrl, path);
 }
 
-async function createQoraVideoTask(config: AiConfig, model: string, prompt: string, _references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
+async function createQoraVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
     const capability = videoModelCapability(model);
     const rawModel = modelOptionName(model);
     const seconds = capability ? String(clampArkSeconds(capability, config.videoSeconds)) : normalizeVideoSeconds(config.videoSeconds);
     const resolution = capability ? normalizeResolutionTier(capability, config.vquality) : parseVideoResolution(config.vquality);
     const ratio = videoAspectRatio(config.size);
+
+    // Upload reference images and videos to Qora OSS and collect asset IDs.
+    const refImages = references.slice(0, capability?.maxImages ?? 9);
+    const refVideos = (options?.videos || []).slice(0, capability?.maxVideos ?? 0);
+    const refAudios = (options?.audios || []).slice(0, capability?.maxAudios ?? 0);
+
+    let qoraRefs: { id: string; role: string }[] = [];
+    if (refImages.length || refVideos.length || refAudios.length) {
+        const imageUploads = refImages.map((img) => qoraUploadImageRef(config, img, "reference_image", options?.signal));
+        const videoUploads = refVideos.map((vid) => qoraUploadVideoRef(config, vid, "reference_video", options?.signal));
+        const audioUploads = refAudios.map((aud) => qoraUploadVideoRef(config, { ...aud, url: aud.url || "", type: aud.type || "audio/mpeg" } as ReferenceVideo, "reference_audio", options?.signal));
+        qoraRefs = await Promise.all([...imageUploads, ...videoUploads, ...audioUploads]);
+    }
+
     const body = new FormData();
     body.append("model", rawModel);
     body.append("prompt", prompt);
     body.append("seconds", seconds);
     body.append("size", `${resolution}p`);
-    body.append("metadata", JSON.stringify({ resolution: `${resolution}p`, ratio, duration: Number(seconds) }));
+    body.append("metadata", JSON.stringify({ resolution: `${resolution}p`, ratio, duration: Number(seconds), references: qoraRefs }));
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(qoraApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error(apiText("noVideoTaskId"));

@@ -364,6 +364,12 @@ function normalizedBaseUrlKey(baseUrl: string) {
     }
 }
 
+/** Returns true if two baseUrls point to the same host/path (ignores trailing /v1). */
+export function normalizedBaseUrlMatch(a: string, b: string) {
+    if (!a || !b) return false;
+    return normalizedBaseUrlKey(a) === normalizedBaseUrlKey(b);
+}
+
 function normalizeImportedBaseUrl(baseUrl: string) {
     const url = new URL(baseUrl.trim());
     url.hash = "";

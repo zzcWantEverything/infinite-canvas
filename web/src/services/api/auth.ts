@@ -95,11 +95,15 @@ export async function fetchCurrentUser(baseUrl: string, token: string): Promise<
 // ── API Key 管理 ──────────────────────────────────────────
 
 export async function fetchUserTokens(baseUrl: string, token: string): Promise<{ id: number; key: string }[]> {
-    const res = await axios.get<{ success: boolean; data?: { id: number; key: string }[] | null }>(
+    const res = await axios.get<{ success: boolean; data?: { items?: { id: number; key: string }[] } | { id: number; key: string }[] | null }>(
         authApiUrl(baseUrl, "/api/token/"),
         { headers: { Authorization: `Bearer ${token}` } },
     );
-    return res.data.data ?? [];
+    const data = res.data.data;
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (Array.isArray((data as { items?: unknown[] }).items)) return (data as { items: { id: number; key: string }[] }).items;
+    return [];
 }
 
 export async function fetchUserVideoModels(baseUrl: string, token: string): Promise<string[]> {
