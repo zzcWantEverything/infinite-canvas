@@ -350,10 +350,22 @@ async function qoraUploadAsset(config: AiConfig, blob: Blob, mimeType: string, s
 /** Upload a ReferenceImage to Qora and return {id, role}. */
 async function qoraUploadImageRef(config: AiConfig, image: ReferenceImage, role: string, signal?: AbortSignal): Promise<{ id: string; role: string }> {
     let blob: Blob | null = null;
+    // Priority 1: storageKey → IndexedDB
     if (image.storageKey) blob = await getMediaBlob(image.storageKey);
-    const candidate = image.url || image.dataUrl || "";
-    if (!blob && candidate.startsWith("data:")) blob = await (await fetch(candidate)).blob();
-    if (!blob && /^https?:\/\//i.test(candidate)) blob = await (await fetch(withLocalProxy(candidate), { signal })).blob();
+    // Priority 2: use imageToDataUrl which handles all cases (storageKey, dataUrl, blob:, url)
+    if (!blob) {
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (dataUrl.startsWith("data:")) blob = await (await fetch(dataUrl)).blob();
+        } catch { /* ignore */ }
+    }
+    // Priority 3: raw candidate
+    if (!blob) {
+        const candidate = image.url || image.dataUrl || "";
+        if (candidate.startsWith("blob:")) blob = await (await fetch(candidate, { signal })).blob();
+        else if (candidate.startsWith("data:")) blob = await (await fetch(candidate)).blob();
+        else if (/^https?:\/\//i.test(candidate)) blob = await (await fetch(withLocalProxy(candidate), { signal })).blob();
+    }
     if (!blob) throw new Error(apiText("referenceImageReadFailed"));
     const mimeType = blob.type || "image/png";
     const id = await qoraUploadAsset(config, blob, mimeType, signal);
