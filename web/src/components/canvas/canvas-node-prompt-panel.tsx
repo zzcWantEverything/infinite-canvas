@@ -168,9 +168,13 @@ function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
 }
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
+    // videoModel 传入 resolveModelForCapability，确保 model-picker 的 value 来自服务器编码后的模型值，
+    // 而不是 defaultConfig 里的占位符（会导致 Radix Select 当前值与 serverVideoModels 列表不匹配）。
+    const videoModel = node.metadata?.model && mode === "video" ? node.metadata.model : globalConfig.videoModel;
     return {
         ...globalConfig,
         model: resolveModelForCapability(globalConfig, node.metadata?.model, mode),
+        videoModel,
         reasoningEffort: node.metadata?.reasoningEffort || globalConfig.reasoningEffort || defaultConfig.reasoningEffort,
         quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
         size: node.metadata?.size || globalConfig.size || defaultConfig.size,
