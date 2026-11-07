@@ -47,7 +47,15 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
     const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels : configOptions;
 
-    const current = value || "";
+    // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
+    const current = useMemo(() => {
+        const raw = value || "";
+        if (capability !== "video" || !serverVideoModels.length) return raw;
+        if (serverVideoModels.includes(raw)) return raw;
+        // 提取纯模型名后查找对应编码
+        const modelName = modelOptionName(raw);
+        return serverVideoModels.find((m) => modelOptionName(m) === modelName) ?? "";
+    }, [capability, serverVideoModels, value]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 
     useEffect(() => {
