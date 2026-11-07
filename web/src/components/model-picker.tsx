@@ -27,21 +27,20 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const session = useUserStore((state) => state.session);
 
     // 视频模型直接从服务器拉取，并用当前渠道 id 编码，确保 resolveModelChannel 能找到有效凭据。
-    // 使用渠道的 apiKey 而非 session.token，以确保普通用户也能拉到模型列表。
+    // /api/user/models 使用 UserAuth（session token），apiKey 是渠道凭据，两者不互通。
     const [serverVideoModels, setServerVideoModels] = useState<string[]>([]);
     useEffect(() => {
-        if (capability !== "video") return;
-        // 找到 baseUrl 匹配的渠道（登录后由 importChannelCredentials 创建）。
-        const matchingChannel = config.channels.find((ch) => session?.baseUrl && normalizedBaseUrlMatch(ch.baseUrl, session.baseUrl)) ?? config.channels[0];
-        if (!matchingChannel?.baseUrl || !matchingChannel.apiKey) return;
-        fetchUserVideoModels(matchingChannel.baseUrl, matchingChannel.apiKey)
+        if (capability !== "video" || !session?.baseUrl || !session?.token) return;
+        const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, session.baseUrl)) ?? config.channels[0];
+        const channelId = matchingChannel?.id ?? "default";
+        fetchUserVideoModels(session.baseUrl, session.token)
             .then((models) => {
                 if (!models.length) return;
-                setServerVideoModels(models.map((m) => encodeChannelModel(matchingChannel.id, m)));
+                setServerVideoModels(models.map((m) => encodeChannelModel(channelId, m)));
             })
             .catch(() => { /* 拉取失败静默处理，降级到配置列表 */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [capability, config.channels]);
+    }, [capability, session?.baseUrl, session?.token]);
 
     const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
 
