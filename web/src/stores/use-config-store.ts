@@ -195,6 +195,7 @@ const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "im
 
 /** Best-effort default capability for a freshly fetched model name; user can override in the channel editor. */
 export function guessCapability(name: string): ModelCapability {
+    if (videoModelCapability(name)) return "video";
     const value = name.toLowerCase();
     if (VIDEO_KEYWORDS.some((keyword) => value.includes(keyword))) return "video";
     if (AUDIO_KEYWORDS.some((keyword) => value.includes(keyword))) return "audio";
@@ -211,6 +212,10 @@ function findChannelModel(config: AiConfig, value: string): { channel: ModelChan
 }
 
 export function modelCapabilityOf(config: AiConfig, value: string): ModelCapability | undefined {
+    // 视频能力表优先：视频模型列表来自 /api/user/models，不一定登记在渠道的模型列表里，
+    // 渠道里也可能被 guessCapability 猜成文本。不认表会让选中的视频模型判成不支持视频，
+    // 生成时回退到默认视频模型，提交出去就变成另一个渠道的模型。
+    if (videoModelCapability(value)) return "video";
     return findChannelModel(config, value)?.model.capability;
 }
 
