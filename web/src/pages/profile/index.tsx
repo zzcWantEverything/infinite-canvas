@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { App, Button, Input, Tooltip } from "antd";
-import { Activity, Copy, BarChart3, WalletCards } from "lucide-react";
+import { Activity, Copy, BarChart3, ExternalLink, WalletCards } from "lucide-react";
 
 import { fetchCurrentUser, fetchAffCode, redeemCode, type NewApiUser } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
@@ -103,6 +103,18 @@ export default function ProfilePage() {
                     <Button type="primary" loading={redeeming} onClick={handleRedeem}>
                         兑换额度
                     </Button>
+                </div>
+                <div className="mt-3 flex items-center gap-1 text-xs text-stone-400 dark:text-stone-500">
+                    需要兑换码？
+                    <a
+                        href="https://wzyp.cn/item/vz2wpe"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-0.5 text-stone-500 underline-offset-2 transition hover:text-stone-800 hover:underline dark:text-stone-400 dark:hover:text-stone-200"
+                    >
+                        点此获取
+                        <ExternalLink className="size-3" />
+                    </a>
                 </div>
             </div>
 

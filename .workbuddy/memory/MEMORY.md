@@ -30,7 +30,11 @@
 
 ## 开发陷阱
 
+- **接口地址不要写死**：`use-config-store.ts` 的默认 baseUrl 是 `siteOrigin()`（跟随当前站点），启动时 `normalizeBaseUrl()` 会把「同机不同端口/本机地址/http-IP 遇 https 站点」的历史配置改成当前 origin。不要再把服务器 IP 写回默认值；外部域名地址必须保留，Gemini 官方和第三方中转本来就要跨域。
+- **非安全上下文**：`crypto.subtle`、`navigator.clipboard`、`crypto.randomUUID` 只在 HTTPS 或 localhost 可用；用 `http://` + 局域网/公网 IP 访问时它们都是 undefined。哈希统一用 `lib/hash.ts` 的 `sha256Hex()`（内部回退 `@noble/hashes`），不要直接调 `crypto.subtle`。
+- 本机没有 bun（`bun: command not found`），装包用 `npm install <pkg> --legacy-peer-deps`：`@ant-design/pro-components@3.0.0-beta.3` 的 peer 要 antd 5，项目是 antd 6，不加这个参数会 ERESOLVE 失败。装完 `bun.lock` 不会更新，需要用户自己跑一次 `bun install` 同步。
 - `prettier --write` 前先确认目标文件在 HEAD 是否 prettier-clean（对比 `git show HEAD:web/<path>`），不 clean 就不要整体格式化，否则 diff 全是噪音。`auth.ts` 踩过。
+- 仓库 `core.autocrlf=true`，工作区里一部分文件本身就是 CRLF（`canvas-top-bar.tsx`、`canvas-node.tsx` 等），对这些文件跑 `prettier --check` 会整篇报格式错误，这是环境问题不是代码问题。判断有没有引入格式问题看 `git diff --numstat` 行数，别顺手 `--write`（会把整份文件换行都改掉）。
 - 同一个文件别分两次改「调用点」和「import」：HMR 会把中间态推给浏览器，表现为 `xxx is not defined`。一次编辑写完两者。
 - Vite 样式/模块不更新：`rm -rf node_modules/.vite` 后重启 + 强制刷新。
 - 改了 `VERSION` / `CHANGELOG.md` 会被 `vite.config.ts` 读进 `__APP_VERSION__` / `__APP_RELEASES__`，需要重启 dev。

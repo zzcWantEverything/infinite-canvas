@@ -53,7 +53,11 @@ export default defineConfig({
     server: {
         proxy: {
             "/api": {
-                target: process.env.VITE_API_BASE || "http://119.45.0.224:3000",
+                target: process.env.VITE_API_BASE || "http://119.45.0.224",
+                changeOrigin: true,
+            },
+            "/v1": {
+                target: process.env.VITE_API_BASE || "http://119.45.0.224",
                 changeOrigin: true,
             },
         },

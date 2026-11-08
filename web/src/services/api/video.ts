@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
+import { sha256Hex } from "@/lib/hash";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution } from "@/lib/media-size";
 import { estimateVideoPrice, videoModelCapability, type VideoModelCapability } from "@/config/video-models";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
@@ -304,9 +305,7 @@ function qoraAssetsProxyUrl(config: Pick<AiConfig, "baseUrl">) {
 /** Upload one file to Qora's OSS and return the asset id. */
 async function qoraUploadAsset(config: AiConfig, blob: Blob, mimeType: string, signal?: AbortSignal): Promise<string> {
     // 1. Compute SHA-256 of the file.
-    const arrayBuf = await blob.arrayBuffer();
-    const hashBuf = await crypto.subtle.digest("SHA-256", arrayBuf);
-    const source = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const source = await sha256Hex(await blob.arrayBuffer());
 
     // 2. Authorize via new-api proxy.
     const authRes = await fetch(qoraAssetsProxyUrl(config), {

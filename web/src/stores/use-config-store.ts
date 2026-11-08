@@ -74,7 +74,43 @@ export type ChannelCredentialsImportResult = {
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "http://119.45.0.224";
+
+function siteOrigin() {
+    return typeof window === "undefined" ? "" : window.location.origin;
+}
+
+function isLoopbackHost(hostname: string) {
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+function isIpv4Host(hostname: string) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+}
+
+/**
+ * 纠正历史配置里写死的接口地址：指向同一台机器的其它端口/协议（例如本机 docker 的 :3000），
+ * 或指向本机地址但在别处访问时，统一改为当前站点 origin。
+ * 指向其它域名/主机的配置保持原样，外部 API（OpenAI、Gemini 官方、第三方中转）不受影响。
+ */
+export function normalizeBaseUrl(baseUrl: string) {
+    const trimmed = (baseUrl || "").trim();
+    const origin = siteOrigin();
+    if (!trimmed || !origin || origin === "null") return trimmed;
+    let url: URL;
+    try {
+        url = new URL(trimmed);
+    } catch {
+        return trimmed;
+    }
+    const site = new URL(origin);
+    if (url.hostname === site.hostname && url.origin !== site.origin) return origin;
+    if (isLoopbackHost(url.hostname) && url.hostname !== site.hostname) return origin;
+    // 站点切到 HTTPS 后，历史配置里写死的 http://IP 会被浏览器当混合内容拦掉，按当前站点处理。
+    if (site.protocol === "https:" && url.protocol === "http:" && isIpv4Host(url.hostname)) return origin;
+    return trimmed;
+}
+
+const OPENAI_BASE_URL = siteOrigin();
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
 export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
@@ -246,8 +282,13 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
+                const persistedChannels = Array.isArray(persistedConfig.channels) ? persistedConfig.channels : [];
+                const config = {
+                    ...defaultConfig,
+                    ...persistedConfig,
+                    baseUrl: normalizeBaseUrl(persistedConfig.baseUrl || defaultConfig.baseUrl),
+                    channels: persistedChannels.map((channel) => ({ ...channel, baseUrl: normalizeBaseUrl(channel.baseUrl) })),
+                };
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
                 return {
