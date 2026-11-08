@@ -1,5 +1,8 @@
 import axios from "axios";
 
+import i18n from "@/i18n";
+import { ApiError, signalUnauthorized } from "./http";
+
 export type NewApiUser = {
     id: number;
     username: string;
@@ -83,11 +86,13 @@ export async function registerUser(
 export async function fetchCurrentUser(baseUrl: string, token: string): Promise<NewApiUser> {
     const res = await axios.get<{ success: boolean; message: string; data: NewApiUser | null }>(
         authApiUrl(baseUrl, "/api/user/self"),
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     const data = res.data;
+    // 兼容后端用 200 + success:false 表达“未登录”的情况，统一按登录过期处理。
     if (!data.success || !data.data) {
-        throw new Error(data.message || "获取用户信息失败");
+        signalUnauthorized();
+        throw new ApiError(data.message || i18n.t("apiErrors.sessionExpired"), "auth", 401);
     }
     return data.data;
 }
@@ -97,7 +102,7 @@ export async function fetchCurrentUser(baseUrl: string, token: string): Promise<
 export async function fetchUserTokens(baseUrl: string, token: string): Promise<{ id: number; key: string }[]> {
     const res = await axios.get<{ success: boolean; data?: { items?: { id: number; key: string }[] } | { id: number; key: string }[] | null }>(
         authApiUrl(baseUrl, "/api/token/"),
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     const data = res.data.data;
     if (!data) return [];
@@ -109,7 +114,7 @@ export async function fetchUserTokens(baseUrl: string, token: string): Promise<{
 export async function fetchUserVideoModels(baseUrl: string, token: string): Promise<string[]> {
     const res = await axios.get<{ success: boolean; data?: string[] | null }>(
         authApiUrl(baseUrl, "/api/user/models"),
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     return res.data.data ?? [];
 }
@@ -130,7 +135,7 @@ export async function createDefaultApiKey(baseUrl: string, token: string): Promi
             auto_groups: [],
             cross_group_retry: false,
         },
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     if (!res.data.success) throw new Error(res.data.message || "创建 API Key 失败");
     return res.data.data?.key ?? "";
@@ -145,7 +150,7 @@ export async function redeemCode(baseUrl: string, token: string, key: string): P
     const res = await axios.post<{ success: boolean; message?: string; data?: number }>(
         authApiUrl(baseUrl, "/api/user/topup"),
         { key },
-        { headers: walletHeaders(token) },
+        { headers: walletHeaders(token), requiresAuth: true },
     );
     if (!res.data.success) throw new Error(res.data.message || "兑换失败");
     return res.data.data ?? 0;
@@ -154,7 +159,7 @@ export async function redeemCode(baseUrl: string, token: string, key: string): P
 export async function fetchAffCode(baseUrl: string, token: string): Promise<string> {
     const res = await axios.get<{ success: boolean; data?: string }>(
         authApiUrl(baseUrl, "/api/user/aff"),
-        { headers: walletHeaders(token) },
+        { headers: walletHeaders(token), requiresAuth: true },
     );
     return res.data.data ?? "";
 }

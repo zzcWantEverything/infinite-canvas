@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Group, Video } from "lucide-react";
+import { Group, MousePointerClick, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -3222,8 +3222,6 @@ function InfiniteCanvasPage() {
                         />
                     ))}
 
-                    {referencePickerNodeId ? <button type="button" className="absolute left-1/2 top-4 z-[90] -translate-x-1/2 rounded-full border px-4 py-2 text-sm font-medium shadow-lg backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitNodeReferenceSelection}>{t("canvas.references.selectingHint")}</button> : null}
-
                     {selectionBox ? (
                         <svg
                             className="pointer-events-none absolute z-[100] overflow-visible"
@@ -3249,6 +3247,22 @@ function InfiniteCanvasPage() {
                         />
                     ) : null}
                 </InfiniteCanvas>
+
+                {referencePickerNodeId ? (
+                    <div className="pointer-events-none absolute inset-x-0 top-[72px] z-[95] flex animate-in justify-center px-4 fade-in slide-in-from-top-1 duration-150">
+                        <div className="pointer-events-auto flex max-w-full items-center gap-2 whitespace-nowrap rounded-full border py-1.5 pl-2 pr-1.5 text-xs shadow-lg backdrop-blur-md" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}>
+                            <span className="grid size-6 shrink-0 place-items-center rounded-full" style={{ background: "rgba(47,128,255,.12)", color: "#2f80ff" }}>
+                                <MousePointerClick className="size-3.5" />
+                            </span>
+                            <span className="font-medium">{t("canvas.references.selectingHint")}</span>
+                            <span className="mx-0.5 h-4 w-px shrink-0" style={{ background: theme.toolbar.border }} />
+                            <button type="button" className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full px-2 py-1 transition hover:opacity-70" style={{ color: theme.node.muted }} onClick={exitNodeReferenceSelection}>
+                                <kbd className="rounded border px-1.5 py-px font-sans text-[10px] font-medium leading-4" style={{ borderColor: theme.toolbar.border }}>ESC</kbd>
+                                <span>{t("canvas.references.exitSelecting")}</span>
+                            </button>
+                        </div>
+                    </div>
+                ) : null}
 
                 <CanvasNodeHoverToolbar
                     node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}

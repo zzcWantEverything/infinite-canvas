@@ -3,6 +3,7 @@ import { App, Button, Input, Tooltip } from "antd";
 import { Activity, Copy, BarChart3, WalletCards } from "lucide-react";
 
 import { fetchCurrentUser, fetchAffCode, redeemCode, type NewApiUser } from "@/services/api/auth";
+import { reportApiError } from "@/services/api/http";
 import { useUserStore } from "@/stores/use-user-store";
 import { useCopyText } from "@/hooks/use-copy-text";
 
@@ -41,7 +42,7 @@ export default function ProfilePage() {
         if (token) {
             fetchAffCode(FIXED_BASE_URL, token)
                 .then(setAffCode)
-                .catch(() => {});
+                .catch(reportApiError);
         }
     }, [token, fetchUser]);
 

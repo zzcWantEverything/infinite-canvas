@@ -8,9 +8,12 @@ import { RouterProvider } from "react-router-dom";
 import { AppProviders } from "@/components/layout/app-providers";
 import "@/i18n";
 import { initAnalytics } from "@/lib/analytics";
+import { installApiErrorReporting } from "@/services/api/http";
+import "@/services/api/session";
 import { router } from "@/router";
 
 initAnalytics();
+installApiErrorReporting();
 
 document.body.style.fontFamily = '"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif';
 

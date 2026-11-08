@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 
 import { useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
+import { setApiErrorNotifier } from "@/services/api/http";
+import { validateSession } from "@/services/api/session";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -14,6 +16,18 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
 
     usePromptSourceScheduler();
+
+    // 把 antd 的 message 交给请求层，非 React 的请求失败也能提示用户。
+    useEffect(() => {
+        setApiErrorNotifier((text) => {
+            void message.error(text);
+        });
+    }, [message]);
+
+    // 启动时校验一次登录态；token 过期会清空会话并回到登录页。
+    useEffect(() => {
+        void validateSession();
+    }, []);
 
     useEffect(() => {
         if (handledConfigParams.current) return;

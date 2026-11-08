@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { encodeChannelModel, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
+import { reportApiError } from "@/services/api/http";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -38,7 +39,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 if (!models.length) return;
                 setServerVideoModels(models.map((m) => encodeChannelModel(channelId, m)));
             })
-            .catch(() => { /* 拉取失败静默处理，降级到配置列表 */ });
+            .catch(reportApiError);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [capability, session?.baseUrl, session?.token]);
 

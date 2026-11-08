@@ -7,6 +7,7 @@ import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
 import { estimateVideoPrice, videoModelCapability } from "@/config/video-models";
+import { reportApiError } from "@/services/api/http";
 import { buildApiUrl, modelOptionName, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
@@ -65,7 +66,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 const ratio = ratios["default"] ?? ratios[keys[0]] ?? 1;
                 setGroupRatio(ratio);
             })
-            .catch(() => { /* 拉不到就保持 1，不影响使用 */ });
+            .catch(reportApiError);
     }, [capability, config.baseUrl, config.apiKey, config.videoModel, config.model]);
 
     const price = basePrice !== null ? basePrice * groupRatio : null;
