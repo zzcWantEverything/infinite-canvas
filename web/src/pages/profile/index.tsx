@@ -10,6 +10,9 @@ import { useCopyText } from "@/hooks/use-copy-text";
 // FIXED_BASE_URL 与 auth/index.tsx 保持一致
 const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/\/+$/, "");
 
+/** 推荐计划暂时下线，需要恢复时把这里改回 true 即可（同时恢复下方推荐链接的拉取）。 */
+const SHOW_AFFILIATE_PROGRAM = false;
+
 function formatQuota(quota: number) {
     return `¥${(quota / 500000).toFixed(2)}`;
 }
@@ -39,7 +42,7 @@ export default function ProfilePage() {
 
     useEffect(() => {
         void fetchUser();
-        if (token) {
+        if (token && SHOW_AFFILIATE_PROGRAM) {
             fetchAffCode(FIXED_BASE_URL, token)
                 .then(setAffCode)
                 .catch(reportApiError);
@@ -69,7 +72,7 @@ export default function ProfilePage() {
 
     return (
         <div className="mx-auto max-w-2xl space-y-5 px-4 py-8">
-            <h1 className="text-xl font-semibold text-stone-900 dark:text-stone-100">个人中心</h1>
+            <h1 className="text-xl font-semibold text-stone-900 dark:text-stone-100">钱包</h1>
 
             {/* 余额统计 */}
             <div className="grid grid-cols-3 divide-x divide-stone-200 rounded-xl border border-stone-200 bg-white dark:divide-stone-700 dark:border-stone-700 dark:bg-stone-900">
@@ -118,37 +121,39 @@ export default function ProfilePage() {
                 </div>
             </div>
 
-            {/* 推荐计划 */}
-            <div className="rounded-xl border border-stone-200 bg-white p-5 dark:border-stone-700 dark:bg-stone-900">
-                <div className="mb-1 text-sm font-medium text-stone-700 dark:text-stone-300">🔗 推荐计划</div>
-                <div className="mb-3 text-xs text-stone-500 dark:text-stone-400">
-                    用户通过您的推荐链接注册后，您即可获得奖励。
-                </div>
-
-                <div className="grid grid-cols-3 gap-3 mb-4">
-                    {[
-                        { label: "待确认", value: formatQuota(user?.aff_quota ?? 0) },
-                        { label: "总收入", value: formatQuota(user?.aff_history_quota ?? 0) },
-                        { label: "邀请", value: `${user?.aff_count ?? 0} 人` },
-                    ].map((item) => (
-                        <div key={item.label} className="rounded-lg bg-stone-50 px-3 py-2 text-center dark:bg-stone-800">
-                            <div className="text-xs text-stone-500 dark:text-stone-400">{item.label}</div>
-                            <div className="mt-0.5 font-mono text-sm font-semibold text-stone-800 dark:text-stone-100">{item.value}</div>
-                        </div>
-                    ))}
-                </div>
-
-                {affLink ? (
-                    <div className="flex gap-2">
-                        <Input value={affLink} readOnly className="font-mono text-xs" />
-                        <Tooltip title="复制推荐链接">
-                            <Button icon={<Copy className="size-4" />} onClick={() => copyText(affLink)} />
-                        </Tooltip>
+            {/* 推荐计划（暂时下线，见 SHOW_AFFILIATE_PROGRAM） */}
+            {SHOW_AFFILIATE_PROGRAM && (
+                <div className="rounded-xl border border-stone-200 bg-white p-5 dark:border-stone-700 dark:bg-stone-900">
+                    <div className="mb-1 text-sm font-medium text-stone-700 dark:text-stone-300">🔗 推荐计划</div>
+                    <div className="mb-3 text-xs text-stone-500 dark:text-stone-400">
+                        用户通过您的推荐链接注册后，您即可获得奖励。
                     </div>
-                ) : (
-                    <div className="text-xs text-stone-400">加载推荐链接中…</div>
-                )}
-            </div>
+
+                    <div className="grid grid-cols-3 gap-3 mb-4">
+                        {[
+                            { label: "待确认", value: formatQuota(user?.aff_quota ?? 0) },
+                            { label: "总收入", value: formatQuota(user?.aff_history_quota ?? 0) },
+                            { label: "邀请", value: `${user?.aff_count ?? 0} 人` },
+                        ].map((item) => (
+                            <div key={item.label} className="rounded-lg bg-stone-50 px-3 py-2 text-center dark:bg-stone-800">
+                                <div className="text-xs text-stone-500 dark:text-stone-400">{item.label}</div>
+                                <div className="mt-0.5 font-mono text-sm font-semibold text-stone-800 dark:text-stone-100">{item.value}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {affLink ? (
+                        <div className="flex gap-2">
+                            <Input value={affLink} readOnly className="font-mono text-xs" />
+                            <Tooltip title="复制推荐链接">
+                                <Button icon={<Copy className="size-4" />} onClick={() => copyText(affLink)} />
+                            </Tooltip>
+                        </div>
+                    ) : (
+                        <div className="text-xs text-stone-400">加载推荐链接中…</div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

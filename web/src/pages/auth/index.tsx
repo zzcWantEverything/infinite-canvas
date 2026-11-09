@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { App, Button, Form, Input, Tabs } from "antd";
 import { useNavigate } from "react-router-dom";
 
-import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, createDefaultApiKey, fetchUserTokens } from "@/services/api/auth";
+import { fetchStatus, loginWithPassword, registerUser, sendVerificationCode, resolveRelayApiKey } from "@/services/api/auth";
 import { useUserStore } from "@/stores/use-user-store";
 import { useConfigStore } from "@/stores/use-config-store";
 
@@ -69,18 +69,15 @@ export default function AuthPage() {
         try {
             const effectiveBaseUrl = getEffectiveBaseUrl();
             const result = await loginWithPassword(FIXED_BASE_URL, values.username, values.password);
-            setSession({ token: result.token, baseUrl: effectiveBaseUrl, user: result.user });
-            try {
-                const tokens = await fetchUserTokens(effectiveBaseUrl, result.token);
-                const existingKey = tokens.find((t) => t.key)?.key;
-                if (existingKey) {
-                    importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: existingKey });
-                } else {
-                    const newKey = await createDefaultApiKey(effectiveBaseUrl, result.token);
-                    importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: newKey || result.token });
-                }
-            } catch {
-                importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey: result.token });
+            setSession({ token: result.token, baseUrl: effectiveBaseUrl, user: result.user, accessExpiresAt: result.accessExpiresAt });
+            // 渠道凭据必须是「能直接调 /v1/* 的中转 key」：
+            // 列表接口返回的是打码 key，新建接口不返回 key，登录 access token 也不是 key。
+            // 所以统一走 resolveRelayApiKey 去取明文，拿不到就留空并提示，绝不拿 result.token 顶替。
+            const apiKey = await resolveRelayApiKey(effectiveBaseUrl, result.token);
+            if (apiKey) {
+                importChannelCredentials({ baseUrl: effectiveBaseUrl, apiKey });
+            } else {
+                void message.warning("未能自动获取 API Key，请到「配置 → 渠道」手动填写");
             }
             void message.success("登录成功");
             navigate("/");

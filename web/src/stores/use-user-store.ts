@@ -8,6 +8,8 @@ export type UserSession = {
     token: string;
     baseUrl: string;
     user: NewApiUser;
+    /** access token 过期时间（unix 秒）。new-api 的 access token 只有 15 分钟，靠它做提前续期。 */
+    accessExpiresAt?: number;
 };
 
 type UserStore = {

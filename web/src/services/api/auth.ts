@@ -22,6 +22,14 @@ export type LoginResult = {
     token: string;
     baseUrl: string;
     user: NewApiUser;
+    /** access token 过期时间（unix 秒） */
+    accessExpiresAt?: number;
+};
+
+export type RefreshResult = {
+    accessToken: string;
+    accessExpiresAt?: number;
+    user?: NewApiUser;
 };
 
 export type SystemStatus = {
@@ -45,7 +53,32 @@ function extractTokenAndUser(data: Record<string, unknown>, baseUrl: string): Lo
     if (!token) throw new Error((data.message as string) || "登录失败");
     const user = inner.user as NewApiUser | undefined;
     if (!user) throw new Error("无法获取用户信息");
-    return { token, baseUrl, user };
+    return { token, baseUrl, user, accessExpiresAt: readExpiresAt(inner.access_expires_at) };
+}
+
+function readExpiresAt(value: unknown): number | undefined {
+    const seconds = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+/**
+ * 用 HttpOnly 的 refresh cookie 换一张新的 access token。
+ * new-api 的 access token 只有 15 分钟，refresh cookie 走 `Path=/api/user/auth`，
+ * 同源请求会自动携带，因此这里不需要任何凭据参数。
+ */
+export async function refreshLoginSession(baseUrl: string): Promise<RefreshResult> {
+    const res = await axios.post<{ success: boolean; message?: string; data?: Record<string, unknown> | null }>(
+        authApiUrl(baseUrl, "/api/user/auth/refresh"),
+        {},
+    );
+    const inner = (res.data.data ?? {}) as Record<string, unknown>;
+    const accessToken = (inner.access_token as string | undefined) || "";
+    if (!res.data.success || !accessToken) throw new ApiError(res.data.message || "登录已过期", "auth", 401);
+    return {
+        accessToken,
+        accessExpiresAt: readExpiresAt(inner.access_expires_at),
+        user: inner.user as NewApiUser | undefined,
+    };
 }
 
 export async function fetchStatus(baseUrl: string): Promise<SystemStatus> {
@@ -99,16 +132,46 @@ export async function fetchCurrentUser(baseUrl: string, token: string): Promise<
 
 // ── API Key 管理 ──────────────────────────────────────────
 
-export async function fetchUserTokens(baseUrl: string, token: string): Promise<{ id: number; key: string }[]> {
-    const res = await axios.get<{ success: boolean; data?: { items?: { id: number; key: string }[] } | { id: number; key: string }[] | null }>(
+export type UserToken = { id: number; key: string; name?: string; status?: number };
+
+/**
+ * new-api 的 `/api/token/` 列表接口把 key 打码成 `abcd**********wxyz`（模型层 MaskTokenKey），
+ * 这里的 key 只能用于展示，**绝不能当作凭据**。真正的完整 key 要再调 `/api/token/{id}/key`。
+ */
+export async function fetchUserTokens(baseUrl: string, token: string): Promise<UserToken[]> {
+    const res = await axios.get<{ success: boolean; data?: { items?: UserToken[] } | UserToken[] | null }>(
         authApiUrl(baseUrl, "/api/token/"),
         { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     const data = res.data.data;
     if (!data) return [];
     if (Array.isArray(data)) return data;
-    if (Array.isArray((data as { items?: unknown[] }).items)) return (data as { items: { id: number; key: string }[] }).items;
+    if (Array.isArray((data as { items?: unknown[] }).items)) return (data as { items: UserToken[] }).items;
     return [];
+}
+
+/** 取令牌的完整明文 key（`POST /api/token/{id}/key`），失败返回空串。 */
+export async function fetchTokenFullKey(baseUrl: string, token: string, tokenId: number): Promise<string> {
+    try {
+        const res = await axios.post<{ success: boolean; message?: string; data?: { key?: string } | null }>(
+            authApiUrl(baseUrl, `/api/token/${tokenId}/key`),
+            {},
+            { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
+        );
+        return res.data.data?.key ?? "";
+    } catch {
+        return "";
+    }
+}
+
+/** 真正能用来调用 `/v1/*`、`/api/qora-assets` 的凭据才算可用。 */
+export function isUsableRelayKey(key: string | undefined | null): boolean {
+    const value = (key || "").trim();
+    if (!value) return false;
+    // 打码后的 key 中间带 *，登录后的 access token 是 JWT（eyJ 开头），两者都认证不了。
+    if (value.includes("*")) return false;
+    if (value.startsWith("eyJ")) return false;
+    return true;
 }
 
 export async function fetchUserVideoModels(baseUrl: string, token: string): Promise<string[]> {
@@ -119,8 +182,13 @@ export async function fetchUserVideoModels(baseUrl: string, token: string): Prom
     return res.data.data ?? [];
 }
 
-export async function createDefaultApiKey(baseUrl: string, token: string): Promise<string> {
-    const res = await axios.post<{ success: boolean; message?: string; data?: { key?: string } | null }>(
+/**
+ * 新建一个「默认」无限额度令牌。
+ * 注意：new-api 的 `POST /api/token/` 只返回 `{success, message}`，**不含 key**，
+ * 所以这里不返回 key，创建后需要重新列一遍拿 id，再走 `/api/token/{id}/key` 取明文。
+ */
+export async function createDefaultApiKey(baseUrl: string, token: string): Promise<void> {
+    const res = await axios.post<{ success: boolean; message?: string }>(
         authApiUrl(baseUrl, "/api/token/"),
         {
             name: "默认",
@@ -138,7 +206,31 @@ export async function createDefaultApiKey(baseUrl: string, token: string): Promi
         { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },
     );
     if (!res.data.success) throw new Error(res.data.message || "创建 API Key 失败");
-    return res.data.data?.key ?? "";
+}
+
+/**
+ * 用登录态换一个「可以真正发请求」的中转 key。
+ * 依次尝试：已有令牌（优先启用的）→ 取其明文；都没有就新建一个再取明文。
+ * 全部失败返回空串，调用方必须自行处理，**不能退回用登录 access token 顶替**。
+ */
+export async function resolveRelayApiKey(baseUrl: string, token: string): Promise<string> {
+    const pick = (list: UserToken[]) => list.find((item) => item.id && item.status !== 2) || list.find((item) => item.id);
+
+    const existing = pick(await fetchUserTokens(baseUrl, token).catch(() => []));
+    if (existing) {
+        const full = await fetchTokenFullKey(baseUrl, token, existing.id);
+        if (isUsableRelayKey(full)) return full;
+    }
+
+    try {
+        await createDefaultApiKey(baseUrl, token);
+    } catch {
+        return "";
+    }
+    const created = pick(await fetchUserTokens(baseUrl, token).catch(() => []));
+    if (!created) return "";
+    const full = await fetchTokenFullKey(baseUrl, token, created.id);
+    return isUsableRelayKey(full) ? full : "";
 }
 
 

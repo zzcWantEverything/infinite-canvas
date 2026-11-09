@@ -127,7 +127,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 {capability ? (
                     <SettingGroup title={t("settingsPanels.video.estimatedPrice")} color={theme.node.muted}>
                         <div className="text-sm" style={{ color: theme.node.text }}>
-                            {price === null ? "-" : `≈ $${price.toFixed(4)}`}
+                            {price === null ? "-" : `≈ ￥${price.toFixed(4)}`}
                         </div>
                     </SettingGroup>
                 ) : (

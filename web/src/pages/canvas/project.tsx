@@ -102,6 +102,40 @@ type CanvasClipboard = {
     connections: CanvasConnection[];
 };
 
+/**
+ * 复制节点时把「参考」一起带过去。
+ *
+ * 画布上的参考就是连线：图片/视频/音频/文本节点连进来即成为该节点的参考；
+ * 节点再连到一个 Config 节点时，Config 的输入才是它的设置与参考来源。
+ * 所以复制单个节点时，这两类连线都要重建到新节点上，否则新节点是「空壳」。
+ *
+ * copiedIds 用于批量粘贴：另一端也在复制范围内的连线由调用方整体重建，这里跳过避免重复。
+ */
+function carriedReferenceConnections(
+    sourceNodeId: string,
+    nextNodeId: string,
+    nodes: CanvasNodeData[],
+    connections: CanvasConnection[],
+    copiedIds?: ReadonlySet<string>,
+): CanvasConnection[] {
+    return connections.flatMap((connection) => {
+        const id = `conn-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        if (connection.toNodeId === sourceNodeId) {
+            if (copiedIds?.has(connection.fromNodeId)) return [];
+            // 上游来源一律保留（图片/视频/音频/文本，含还没出图或来自分组的节点），
+            // 宁可多带一条边，也不要漏掉用户眼里的「参考」。
+            return [{ ...connection, id, toNodeId: nextNodeId }];
+        }
+        if (connection.fromNodeId === sourceNodeId) {
+            if (copiedIds?.has(connection.toNodeId)) return [];
+            const target = nodes.find((item) => item.id === connection.toNodeId);
+            if (target?.type !== CanvasNodeType.Config) return [];
+            return [{ ...connection, id, fromNodeId: nextNodeId }];
+        }
+        return [];
+    });
+}
+
 type ConnectionDropTarget = {
     nodeId: string | null;
     isNearNode: boolean;
@@ -991,9 +1025,12 @@ function InfiniteCanvasPage() {
             id,
             title: `${source.title} Copy`,
             position: { x: source.position.x + 36, y: source.position.y + 36 },
+            // metadata 要与原节点分开，否则改副本配置会连带改到原件
+            metadata: source.metadata ? { ...source.metadata } : undefined,
         };
 
         setNodes((prev) => [...prev, next]);
+        setConnections((prev) => [...prev, ...carriedReferenceConnections(nodeId, id, nodesRef.current, connectionsRef.current)]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         if (next.type !== CanvasNodeType.Group) setDialogNodeId(id);
@@ -1071,8 +1108,16 @@ function InfiniteCanvasPage() {
             ];
         });
 
+        // 选区内部的连线整体重建；跨选区的「参考」连线由 carriedReferenceConnections 补上。
+        const copiedIds = new Set(idMap.keys());
+        const carriedConnections = clipboard.nodes.flatMap((node) => {
+            const nextNodeId = idMap.get(node.id);
+            if (!nextNodeId) return [];
+            return carriedReferenceConnections(node.id, nextNodeId, nodesRef.current, connectionsRef.current, copiedIds);
+        });
+
         setNodes((prev) => [...prev, ...pastedNodes]);
-        setConnections((prev) => [...prev, ...nextConnections]);
+        setConnections((prev) => [...prev, ...nextConnections, ...carriedConnections]);
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
         setContextMenu(null);

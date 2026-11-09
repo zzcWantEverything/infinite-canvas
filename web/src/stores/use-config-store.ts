@@ -137,7 +137,7 @@ export const defaultConfig: AiConfig = {
     ],
     model: "default::model-359263564038410254",
     imageModel: "default::gpt-image-2",
-    videoModel: "default::model-359263564038410254",
+    videoModel: "default::qr-v007",
     textModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
@@ -195,7 +195,9 @@ const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "im
 
 /** Best-effort default capability for a freshly fetched model name; user can override in the channel editor. */
 export function guessCapability(name: string): ModelCapability {
-    if (videoModelCapability(name)) return "video";
+    const known = videoModelCapability(name);
+    // 已下架模型不再算视频模型，否则猜出来的能力会把它们重新塞回视频列表。
+    if (known) return known.available === false ? "text" : "video";
     const value = name.toLowerCase();
     if (VIDEO_KEYWORDS.some((keyword) => value.includes(keyword))) return "video";
     if (AUDIO_KEYWORDS.some((keyword) => value.includes(keyword))) return "audio";
@@ -215,7 +217,10 @@ export function modelCapabilityOf(config: AiConfig, value: string): ModelCapabil
     // 视频能力表优先：视频模型列表来自 /api/user/models，不一定登记在渠道的模型列表里，
     // 渠道里也可能被 guessCapability 猜成文本。不认表会让选中的视频模型判成不支持视频，
     // 生成时回退到默认视频模型，提交出去就变成另一个渠道的模型。
-    if (videoModelCapability(value)) return "video";
+    // 但已下架（available === false）的模型要判成不支持视频，否则旧节点上残留的
+    // 下架模型名会被当成合法选择一直提交出去。
+    const known = videoModelCapability(value);
+    if (known) return known.available === false ? undefined : "video";
     return findChannelModel(config, value)?.model.capability;
 }
 
@@ -229,6 +234,12 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
     if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    // 视频：上面两级都可能指向已下架的模型（节点旧值、用户配置的默认值），
+    // 这时退回当前仍可选的视频模型，避免继续把下架模型提交出去。
+    if (capability === "video") {
+        const selectable = selectableModelsByCapability(config, "video").filter((model) => videoModelCapability(model)?.available !== false);
+        if (selectable.length) return selectable[0];
+    }
     return fallbackModel;
 }
 

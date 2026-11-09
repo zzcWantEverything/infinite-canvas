@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { type InternalAxiosRequestConfig } from "axios";
 
 import i18n from "@/i18n";
 
@@ -110,6 +110,41 @@ export function setUnauthorizedHandler(handler: (() => void) | null) {
     unauthorizedHandler = handler;
 }
 
+/**
+ * access token 的读取与续期钩子，由 session 层注册。
+ * 放在这里而不是直接 import store，是为了避免 http -> store -> http 的循环依赖。
+ */
+export type AuthTokenHooks = {
+    /** 当前可用的 access token，没有登录态时返回 null */
+    getToken: () => string | null;
+    /** 是否需要在发请求前先续期 */
+    needsRefresh: () => boolean;
+    /** 续期并返回新 token，失败返回 null */
+    refresh: () => Promise<string | null>;
+};
+
+let authTokenHooks: AuthTokenHooks | null = null;
+
+export function setAuthTokenHooks(hooks: AuthTokenHooks | null) {
+    authTokenHooks = hooks;
+}
+
+const REFRESH_PATH = "/api/user/auth/refresh";
+
+function isRefreshRequest(url: string | undefined) {
+    return Boolean(url && url.includes(REFRESH_PATH));
+}
+
+/** 兼容 axios v1 的 AxiosHeaders 与普通对象两种 header 容器。 */
+function applyAuthHeader(config: InternalAxiosRequestConfig, token: string) {
+    const headers = config.headers as unknown as { set?: (key: string, value: string) => void } | undefined;
+    if (headers && typeof headers.set === "function") {
+        headers.set("Authorization", `Bearer ${token}`);
+        return;
+    }
+    config.headers = { ...(config.headers || {}), Authorization: `Bearer ${token}` } as InternalAxiosRequestConfig["headers"];
+}
+
 /** 业务层发现登录态不可用时主动触发（例如 200 + success:false 的未登录响应）。 */
 export function signalUnauthorized() {
     unauthorizedHandler?.();
@@ -122,13 +157,42 @@ export function installApiErrorReporting() {
     });
 }
 
+// 请求前统一注入 access token；快过期时先续期，做到「无感」。
+axios.interceptors.request.use(async (config) => {
+    if (!config.requiresAuth || !authTokenHooks) return config;
+    let token = authTokenHooks.getToken();
+    if (token && authTokenHooks.needsRefresh()) {
+        token = (await authTokenHooks.refresh()) ?? token;
+    }
+    if (token) applyAuthHeader(config, token);
+    return config;
+});
+
+type RetriableConfig = InternalAxiosRequestConfig & { sessionRetried?: boolean };
+
 // 全局收敛所有 axios 请求的错误；取消的请求保持原样，交给业务层判断是否静默。
 axios.interceptors.response.use(
     (response) => response,
-    (error) => {
+    async (error) => {
         if (axios.isCancel(error)) return Promise.reject(error);
         const apiError = toApiError(error);
-        if (apiError.status === 401 && axios.isAxiosError(error) && error.config?.requiresAuth) unauthorizedHandler?.();
+
+        // 401：先用 refresh cookie 静默续期并重放一次，续不上才算登录态失效。
+        if (apiError.status === 401 && axios.isAxiosError(error) && error.config?.requiresAuth && authTokenHooks) {
+            const config = error.config as RetriableConfig;
+            if (!config.sessionRetried && !isRefreshRequest(config.url)) {
+                config.sessionRetried = true;
+                const token = await authTokenHooks.refresh();
+                if (token) {
+                    applyAuthHeader(config, token);
+                    return axios.request(config);
+                }
+            }
+            unauthorizedHandler?.();
+        } else if (apiError.status === 401 && axios.isAxiosError(error) && error.config?.requiresAuth) {
+            unauthorizedHandler?.();
+        }
+
         return Promise.reject(apiError);
     },
 );

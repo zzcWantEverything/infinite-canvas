@@ -57,6 +57,14 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         const modelName = modelOptionName(raw);
         return serverVideoModels.find((m) => modelOptionName(m) === modelName) ?? "";
     }, [capability, serverVideoModels, value]);
+
+    // 节点上残留的模型名不在服务端列表里（例如已下架的 ark 模型）时，自动纠正为列表首个可用模型。
+    // 否则界面显示为空，但节点里仍存着旧模型名，用户不重新选就会把已下线的模型提交出去。
+    useEffect(() => {
+        if (capability !== "video" || !serverVideoModels.length || current) return;
+        onChange(serverVideoModels[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [capability, current, serverVideoModels]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 
     useEffect(() => {

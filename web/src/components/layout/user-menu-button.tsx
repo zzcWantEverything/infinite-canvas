@@ -54,7 +54,7 @@ export function UserMenuButton() {
         {
             key: "profile",
             icon: menuIcon(<User className="size-4" />),
-            label: "个人中心",
+            label: "钱包",
             onClick: () => navigate("/profile"),
         },
         {

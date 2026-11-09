@@ -17,6 +17,11 @@ export type VideoModelPrice =
 export type VideoModelCapability = {
     label: string;
     protocol: VideoProtocol;
+    /**
+     * false 表示该模型已下架：仍保留能力数据用于历史节点展示，但不再参与
+     * 能力判定、默认值回退和模型列表，避免已停用的模型被当成可用视频模型。
+     */
+    available?: boolean;
     /** Resolution tiers in ascending order; each maps to a 16:9 and a 9:16 size. */
     resolutions: string[];
     ratios: string[];
@@ -71,6 +76,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-359237364507209728": {
         label: "Seedance 2.5",
         protocol: "ark",
+        available: false,
         resolutions: ["480", "720", "1080"],
         ratios: ["16:9", "9:16"],
         seconds: { min: 4, max: 30, step: 1 },
@@ -87,6 +93,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-359263564038410254": {
         label: "Seedance 2.0",
         protocol: "ark",
+        available: false,
         resolutions: ["480", "720", "1080"],
         ratios: ["16:9", "9:16"],
         seconds: reference415,
@@ -103,6 +110,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-359263564038410247": {
         label: "Seedance 2.0 Fast",
         protocol: "ark",
+        available: false,
         resolutions: ["480", "720"],
         ratios: ["16:9", "9:16"],
         seconds: reference415,
@@ -118,6 +126,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-359263564038410240": {
         label: "Seedance 2.0 Mini",
         protocol: "ark",
+        available: false,
         resolutions: ["480", "720"],
         ratios: ["16:9", "9:16"],
         seconds: reference415,
@@ -133,6 +142,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-2113237671521415168": {
         label: "Seedance 2.0 fast-I",
         protocol: "ark",
+        available: false,
         resolutions: ["720"],
         ratios: ["16:9"],
         seconds: { min: 5, max: 15, step: 5 },
@@ -145,6 +155,7 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
     "model-2113239440460738561": {
         label: "Seedance 2.0 mini-I",
         protocol: "ark",
+        available: false,
         resolutions: ["720"],
         ratios: ["16:9"],
         seconds: { min: 5, max: 15, step: 5 },

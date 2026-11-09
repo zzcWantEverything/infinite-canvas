@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
 import { setApiErrorNotifier } from "@/services/api/http";
-import { validateSession } from "@/services/api/session";
+import { repairChannelCredentials, validateSession } from "@/services/api/session";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -27,6 +27,11 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     // 启动时校验一次登录态；token 过期会清空会话并回到登录页。
     useEffect(() => {
         void validateSession();
+    }, []);
+
+    // 登录态校验通过后，顺手修复历史遗留的脏渠道凭据（打码 key / 登录 token 当 key 用）。
+    useEffect(() => {
+        void repairChannelCredentials();
     }, []);
 
     useEffect(() => {

@@ -10,6 +10,9 @@ import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { DOCS_URL } from "@/constant/env";
 
+/** 顶栏的 Codex 连接状态徽标暂时隐藏，需要恢复时把这里改回 true。 */
+const SHOW_AGENT_STATUS = false;
+
 export function CanvasTopBar({
     title,
     titleDraft,
@@ -134,7 +137,7 @@ export function CanvasTopBar({
                             </button>
                         )}
                     </div>
-                    <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />
+                    {SHOW_AGENT_STATUS && <CompactAgentStatus status={compactAgentStatus} onClick={onToggleAgent} />}
                 </div>
 
                 <div className="pointer-events-auto flex items-center gap-1.5">
