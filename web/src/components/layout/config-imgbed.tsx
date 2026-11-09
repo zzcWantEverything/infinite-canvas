@@ -47,7 +47,7 @@ export function ConfigImgbed() {
                 <Form.Item label={t("config.imgbed.address")} extra={t("config.imgbed.addressDescription")} className="mt-3 mb-0">
                     <Input
                         value={config.imgbedUrl}
-                        placeholder="http://119.45.0.224:8081"
+                        placeholder="/imgbed"
                         onChange={(event) => updateConfig("imgbedUrl", event.target.value)}
                         prefix={<Link2 className="size-4 text-stone-400" />}
                     />

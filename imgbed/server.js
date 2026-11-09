@@ -20,6 +20,14 @@ const MIME_TO_EXT = {
   "video/mp4": "mp4", "audio/mpeg": "mp3", "audio/wav": "wav", "audio/mp3": "mp3",
 };
 
+// Served files must carry a real MIME type: browsers refuse to render images sent
+// as application/octet-stream once X-Content-Type-Options: nosniff is in play.
+// nosniff 本身由前置 nginx 统一加（见 snippets/security-headers.conf），这里不重复。
+const EXT_TO_MIME = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif",
+  mp4: "video/mp4", mp3: "audio/mpeg", wav: "audio/wav",
+};
+
 function send(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
   res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -37,7 +45,12 @@ const server = http.createServer((req, res) => {
     if (!filePath.startsWith(PUBLIC_DIR)) return send(res, 403, { error: "forbidden" });
     fs.stat(filePath, (err, stat) => {
       if (err || !stat.isFile()) return send(res, 404, { error: "not found" });
-      res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=31536000" });
+      const ext = path.extname(filePath).slice(1).toLowerCase();
+      res.writeHead(200, {
+        "Content-Type": EXT_TO_MIME[ext] || "application/octet-stream",
+        "Content-Length": stat.size,
+        "Cache-Control": "public, max-age=31536000",
+      });
       fs.createReadStream(filePath).pipe(res);
     });
     return;

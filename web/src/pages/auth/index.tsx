@@ -109,10 +109,10 @@ export default function AuthPage() {
     }
 
     return (
-        <div className="flex min-h-dvh items-center justify-center bg-background px-4">
-            <div className="w-full max-w-sm">
+        <div className="flex h-dvh justify-center overflow-y-auto bg-background px-4">
+            <div className="my-auto w-full max-w-sm py-8">
                 <div className="mb-8 text-center">
-                    <img src="/logo.png" alt="画柚" className="mx-auto mb-2 block size-50 object-contain" />
+                    <img src="/logo.png" alt="画柚" className="mx-auto mb-2 block size-50 max-h-[24dvh] object-contain" />
                 </div>
                 <div className="rounded-xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-700 dark:bg-stone-900">
                     <Tabs

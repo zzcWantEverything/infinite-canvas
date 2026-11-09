@@ -454,6 +454,8 @@ async function resolveArkReferenceUrl(config: AiConfig, image: ReferenceImage): 
 
     const imgbedUrl = (config.imgbedUrl || "").trim().replace(/\/+$/, "");
     if (!imgbedUrl) throw new Error(apiText("arkReferenceNeedsPublicUrl"));
+    // 图床地址允许是同源相对路径（如 /imgbed），但火山侧要抓图必须是绝对 URL。
+    const imgbedBase = (/^https?:\/\//i.test(imgbedUrl) ? imgbedUrl : new URL(imgbedUrl, window.location.origin).href).replace(/\/+$/, "");
 
     // 从 IndexedDB / dataUrl 拿到 Blob，然后 POST 到图床。
     let blob: Blob | null = null;
@@ -471,8 +473,8 @@ async function resolveArkReferenceUrl(config: AiConfig, image: ReferenceImage): 
     const json = await resp.json();
     if (!json.url) throw new Error(apiText("arkUploadFailed", { status: 0 }));
 
-    // 图床返回的是相对路径 /public/xxx.png，加上 imgbed 地址变成完整 URL。
-    return /^https?:\/\//i.test(json.url) ? json.url : `${imgbedUrl}${json.url}`;
+    // 图床返回的是相对路径 /public/xxx.png，加上图床地址变成完整 URL。
+    return /^https?:\/\//i.test(json.url) ? json.url : `${imgbedBase}${json.url}`;
 }
 
 function publicReferenceUrl(image: ReferenceImage) {

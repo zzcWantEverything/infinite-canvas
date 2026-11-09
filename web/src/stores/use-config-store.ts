@@ -159,8 +159,18 @@ export const defaultConfig: AiConfig = {
     canvasImageCount: "3",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
-    imgbedUrl: "http://119.45.0.224:8081",
+    imgbedUrl: "/imgbed",
 };
+
+// 旧的图床默认值是写死的 http://<IP>:8081，站点迁到 HTTPS 后会被浏览器按混合内容拦截。
+// 统一收敛到同源路径 /imgbed（由 nginx 反代到图床服务），已有用户的本地配置也一并迁移。
+const LEGACY_IMGBED_URL = "http://119.45.0.224:8081";
+function normalizeImgbedUrl(url: string | undefined) {
+    const value = (url || "").trim();
+    if (!value) return defaultConfig.imgbedUrl;
+    if (value.replace(/\/+$/, "").toLowerCase() === LEGACY_IMGBED_URL) return defaultConfig.imgbedUrl;
+    return value;
+}
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
     url: "",
@@ -302,6 +312,7 @@ export const useConfigStore = create<ConfigStore>()(
                 const config = {
                     ...defaultConfig,
                     ...persistedConfig,
+                    imgbedUrl: normalizeImgbedUrl(persistedConfig.imgbedUrl),
                     baseUrl: normalizeBaseUrl(persistedConfig.baseUrl || defaultConfig.baseUrl),
                     channels: persistedChannels.map((channel) => ({ ...channel, baseUrl: normalizeBaseUrl(channel.baseUrl) })),
                 };
@@ -464,10 +475,13 @@ export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     if (!decoded) return value;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
-    // 如果能力表里有友好名称（如 "Seedance 2.5"），优先显示，再加渠道名区分。
+    // 如果能力表里有友好名称（如 "Seedance 2.5"），优先显示。
     const cap = videoModelCapability(decoded.model);
     const displayName = cap?.label || decoded.model;
-    return channel ? `${displayName}（${channel.name}）` : displayName;
+    if (!channel) return displayName;
+    // 只有同名模型真的分布在多个渠道时才补渠道名做区分，单渠道时不显示冗余后缀。
+    const sharedAcrossChannels = config.channels.filter((item) => item.models.some((model) => model.name === decoded.model)).length;
+    return sharedAcrossChannels > 1 ? `${displayName}（${channel.name}）` : displayName;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {

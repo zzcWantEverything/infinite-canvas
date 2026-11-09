@@ -268,4 +268,15 @@ export const videoModelCapabilities: Record<string, VideoModelCapability> = {
         maxImages: 9, maxVideos: 3, maxAudios: 3,
         price: { default: { kind: "per_second", pricePerSecond: 0.15 } },
     },
+    // 70 积分/条（10 积分 = ¥1，即 ¥7.00/条）；支持 21:9 超宽屏，时长 5–30 秒连续可选。
+    "qr-v044": {
+        label: "Seedance 2.5 · 满血全能2.5",
+        protocol: "qora",
+        resolutions: ["720"],
+        ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+        seconds: { min: 5, max: 30 },
+        defaultSeconds: 5,
+        maxImages: 30, maxVideos: 10, maxAudios: 10,
+        price: { default: { kind: "per_call", price: 7.0 } },
+    },
 };

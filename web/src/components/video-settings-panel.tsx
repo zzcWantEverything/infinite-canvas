@@ -6,9 +6,10 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
-import { estimateVideoPrice, videoModelCapability } from "@/config/video-models";
+import { estimateVideoPrice, videoModelCapability, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
 import { reportApiError } from "@/services/api/http";
-import { buildApiUrl, modelOptionName, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
+import { fetchGroupRatio, type PricingRatioSnapshot } from "@/services/api/pricing";
 
 const resolutionOptions = [
     { value: "480", label: "480p" },
@@ -38,8 +39,13 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const capability = videoModelCapability(modelOptionName(config.videoModel || config.model));
     const secondsRange = capability ? { min: capability.seconds.min, max: capability.seconds.max, step: capability.seconds.step || 1 } : { min: VIDEO_SECONDS_MIN, max: VIDEO_SECONDS_MAX, step: 1 };
     const seconds = capability ? clampRangeSeconds(capability, config.videoSeconds) : Number(clampVideoSeconds(config.videoSeconds || "6"));
+    // 时长写死的模型（min === max）没有可拖动区间，antd 的 (value-min)/(max-min) 会算出 NaN，
+    // 缩略点被钉在起点。这里改用「全局秒数轴」，让 10 秒这类固定时长落在它该在的位置，同时禁用拖动。
+    const fixedSeconds = Boolean(capability && capability.seconds.min === capability.seconds.max);
+    const secondsAxis = fixedSeconds ? { min: VIDEO_SECONDS_MIN, max: Math.max(VIDEO_SECONDS_MAX, seconds), step: 1 } : secondsRange;
     const videoMode = normalizeVideoModeValue(config.videoMode);
     const resolution = parseVideoResolution(config.vquality);
+    const secondsNote = buildSecondsNote(capability, seconds, resolution, fixedSeconds);
     const selectedRatio = inferVideoRatio(config.size || "auto");
     const dimensions = readVideoDimensions(config.size || "auto", resolution, selectedRatio);
     const supportedRatios = capability ? videoRatioOptions.filter((item) => capability.ratios.includes(item.value)) : videoRatioOptions;
@@ -47,29 +53,24 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const basePrice = capability ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
 
     // 从 /api/pricing 拉取当前用户的分组倍数，乘入预估价格使其与后端预扣费一致。
-    const [groupRatio, setGroupRatio] = useState<number>(1);
+    // 取数逻辑放在 services/api/pricing，不把 apiKey 当硬前置条件——否则面板拿不到 key 时倍率会静默变成 1。
+    const [ratioSnapshot, setRatioSnapshot] = useState<PricingRatioSnapshot | null>(null);
     useEffect(() => {
-        if (!capability || !config.baseUrl || !config.apiKey) return;
-        const model = modelOptionName(config.videoModel || config.model);
-        const rawBase = config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "");
-        const origin = rawBase.replace(/:\d+$/, "");
-        const url = withLocalProxy(origin + "/api/pricing");
-        fetch(url, { headers: { Authorization: `Bearer ${config.apiKey}` } })
-            .then((r) => r.json())
-            .then((data) => {
-                if (!data.success || !data.group_ratio) return;
-                // 找当前用户组的倍数（group_ratio 是 { groupName: ratio } 的对象）；
-                // /api/pricing 只返回当前用户可用的分组，取第一个即当前用户组。
-                const ratios: Record<string, number> = data.group_ratio;
-                const keys = Object.keys(ratios);
-                // 优先取 model 对应的渠道所在组 ratio，简化为取 default 或第一个。
-                const ratio = ratios["default"] ?? ratios[keys[0]] ?? 1;
-                setGroupRatio(ratio);
+        if (!capability) return;
+        let alive = true;
+        fetchGroupRatio(config.baseUrl, config.apiKey)
+            .then((snapshot) => {
+                if (alive) setRatioSnapshot(snapshot);
             })
             .catch(reportApiError);
-    }, [capability, config.baseUrl, config.apiKey, config.videoModel, config.model]);
+        return () => {
+            alive = false;
+        };
+    }, [capability, config.baseUrl, config.apiKey]);
 
+    const groupRatio = ratioSnapshot?.ratio ?? 1;
     const price = basePrice !== null ? basePrice * groupRatio : null;
+    const priceHint = ratioSnapshot ? t("settingsPanels.video.groupRatio", { group: ratioSnapshot.group, ratio: formatRatio(groupRatio) }) : "";
     const applySize = (nextResolution: string, ratio: string) => {
         onConfigChange("vquality", nextResolution);
         onConfigChange("size", computeVideoSize(nextResolution, ratio));
@@ -118,15 +119,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     </div>
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
-                    <div className="flex items-center gap-3" onMouseDown={(event) => event.stopPropagation()}>
-                        <Slider className="min-w-0 flex-1" min={secondsRange.min} max={secondsRange.max} step={secondsRange.step} value={seconds} onChange={(value) => onConfigChange("videoSeconds", String(Array.isArray(value) ? value[0] : value))} />
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1" onMouseDown={(event) => event.stopPropagation()}>
+                        <Slider className="min-w-[88px] flex-1" min={secondsAxis.min} max={secondsAxis.max} step={secondsAxis.step} value={seconds} disabled={fixedSeconds} onChange={(value) => onConfigChange("videoSeconds", String(Array.isArray(value) ? value[0] : value))} />
                         <SecondsInput value={seconds} min={secondsRange.min} max={secondsRange.max} theme={theme} onCommit={(value) => onConfigChange("videoSeconds", String(value))} />
                         <span className="shrink-0 text-sm" style={{ color: theme.node.muted }}>s</span>
+                        {secondsNote ? <span className="ml-auto shrink-0 whitespace-nowrap text-[11px]" style={{ color: theme.node.muted }}>{secondsNote}</span> : null}
                     </div>
                 </SettingGroup>
                 {capability ? (
                     <SettingGroup title={t("settingsPanels.video.estimatedPrice")} color={theme.node.muted}>
-                        <div className="text-sm" style={{ color: theme.node.text }}>
+                        <div className="text-sm" style={{ color: theme.node.text }} title={priceHint || undefined}>
                             {price === null ? "-" : `≈ ￥${price.toFixed(4)}`}
                         </div>
                     </SettingGroup>
@@ -155,8 +157,10 @@ export function videoSizeLabel(value: string) {
     return ratio === "auto" ? i18n.t("settingsPanels.video.adaptive") : ratio;
 }
 
-export function videoSecondsLabel(value: string) {
+export function videoSecondsLabel(value: string, capability?: { seconds: { min: number; max: number; step?: number }; defaultSeconds: number } | null) {
     if (String(value).trim() === "-1") return i18n.t("settingsPanels.video.smart");
+    // 节点里存的秒数可能超出当前模型范围（例如换了模型），摘要要显示钳制后的真实值。
+    if (capability) return `${clampRangeSeconds(capability, value)}s`;
     return `${value || "6"}s`;
 }
 
@@ -219,6 +223,34 @@ function clampRangeSeconds(capability: { seconds: { min: number; max: number; st
     const requested = Math.floor(Number(value) || capability.defaultSeconds);
     const bounded = Math.min(capability.seconds.max, Math.max(capability.seconds.min, requested));
     return capability.seconds.min + Math.round((bounded - capability.seconds.min) / step) * step;
+}
+
+/**
+ * 秒数这一行的小字说明：讲清楚为什么时长不能随便调。
+ * - 按条计费的模型，秒数不影响价格
+ * - 时长写死的模型，直接说明固定多少秒
+ * - 只能取离散值的模型，把可选值列出来
+ */
+function buildSecondsNote(capability: VideoModelCapability | null, seconds: number, resolution: string, fixedSeconds: boolean) {
+    if (!capability) return "";
+    const parts: string[] = [];
+    if (videoModelPrice(capability, resolution, false).kind === "per_call") parts.push(i18n.t("settingsPanels.video.perCall"));
+    if (fixedSeconds) {
+        parts.push(i18n.t("settingsPanels.video.fixedSeconds", { seconds }));
+    } else {
+        const step = capability.seconds.step || 1;
+        if (step > 1) {
+            const values: number[] = [];
+            for (let value = capability.seconds.min; value <= capability.seconds.max; value += step) values.push(value);
+            parts.push(i18n.t("settingsPanels.video.stepSeconds", { values: values.join(" / ") }));
+        }
+    }
+    return parts.join(" · ");
+}
+
+/** 倍率展示：整数不加小数点，小数最多两位（0.85 / 1.25 / 2）。 */
+function formatRatio(value: number) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function SecondsInput({ value, min, max, theme, onCommit }: { value: number; min: number; max: number; theme: CanvasTheme; onCommit: (value: number) => void }) {
