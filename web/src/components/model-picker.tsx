@@ -1,14 +1,15 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, useSyncExternalStore } from "react";
 import { Cpu } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
-import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { encodeChannelModel, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
+import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -47,6 +48,26 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
 
     // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
     const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels : configOptions;
+
+    // 网关目录把同一款模型的多条线路归到一张卡片（variant_group）。这里按组折叠：
+    // 多条线路的组一定加标题；单条线路的组只有在「卡片名 ≠ 线路名」时才加标题
+    // （例如 Seedance 2.0 Mini 只有一条线路，不加标题就分不清它属于哪张卡片）。
+    const catalogVersion = useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
+    const optionGroups = useMemo(() => {
+        const groups = new Map<string, { key: string; label: string; models: string[]; fromCatalog: boolean }>();
+        for (const option of options) {
+            const name = modelOptionName(option);
+            const group = catalogGroupOf(name);
+            const key = group?.model || name;
+            const existing = groups.get(key);
+            if (existing) {
+                existing.models.push(option);
+                continue;
+            }
+            groups.set(key, { key, label: group?.display_name || name, models: [option], fromCatalog: Boolean(group) });
+        }
+        return Array.from(groups.values());
+    }, [options, catalogVersion]);
 
     // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
     const current = useMemo(() => {
@@ -111,12 +132,30 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 onPointerDown={(event) => event.stopPropagation()}
                 onMouseDown={(event) => event.stopPropagation()}
             >
-                {options.length ? (
-                    options.map((model) => (
-                        <SelectItem key={model} value={model} textValue={modelOptionLabel(config, model)}>
-                            <ModelLabel config={config} model={model} />
-                        </SelectItem>
-                    ))
+                {optionGroups.length ? (
+                    optionGroups.map((group) => {
+                        // 组内条目只显示线路名，卡片名交给组标题，避免同一串文字出现两次。
+                        const variantLabel = (model: string) => catalogVariant(modelOptionName(model))?.display_name;
+                        const only = group.models[0];
+                        const needsHeader = group.models.length > 1 || (group.fromCatalog && group.label !== (variantLabel(only) || modelOptionLabel(config, only)));
+                        if (!needsHeader) {
+                            return (
+                                <SelectItem key={only} value={only} textValue={modelOptionLabel(config, only)}>
+                                    <ModelLabel config={config} model={only} />
+                                </SelectItem>
+                            );
+                        }
+                        return (
+                            <SelectGroup key={group.key}>
+                                <SelectLabel>{group.label}</SelectLabel>
+                                {group.models.map((model) => (
+                                    <SelectItem key={model} value={model} textValue={modelOptionLabel(config, model)}>
+                                        <ModelLabel config={config} model={model} label={variantLabel(model)} />
+                                    </SelectItem>
+                                ))}
+                            </SelectGroup>
+                        );
+                    })
                 ) : (
                     <SelectItem value="__empty__" disabled>
                         {emptyModelLabel(config, capability)}
@@ -133,11 +172,11 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
     return config.models.length ? i18n.t("settingsPanels.model.noMatch", { capability: label }) : i18n.t("settingsPanels.model.addFirst");
 }
 
-function ModelLabel({ config, model }: { config: AiConfig; model: string }) {
+function ModelLabel({ config, model, label }: { config: AiConfig; model: string; label?: string }) {
     return (
         <span className="flex min-w-0 items-center gap-2">
             <ModelIcon model={model} />
-            <span className="truncate">{modelOptionLabel(config, model)}</span>
+            <span className="truncate">{label || modelOptionLabel(config, model)}</span>
         </span>
     );
 }

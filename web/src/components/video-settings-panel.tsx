@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Slider } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -10,6 +10,7 @@ import { estimateVideoPrice, videoModelCapability, videoModelPrice, type VideoMo
 import { reportApiError } from "@/services/api/http";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 import { fetchGroupRatio, type PricingRatioSnapshot } from "@/services/api/pricing";
+import { modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
 
 const resolutionOptions = [
     { value: "480", label: "480p" },
@@ -35,8 +36,11 @@ type VideoSettingsPanelProps = {
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
+    // 能力优先取网关目录，目录拉到之前先用内置表兜底；目录是异步来的，订阅版本号让面板重算一次。
+    const catalogVersion = useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
+    const modelName = modelOptionName(config.videoModel || config.model);
+    const capability = useMemo(() => videoModelCapability(modelName), [modelName, catalogVersion]);
     // 火山格式的模型各自限制尺寸、时长和参考素材，面板按当前模型的能力渲染；其他模型沿用全局范围。
-    const capability = videoModelCapability(modelOptionName(config.videoModel || config.model));
     const secondsRange = capability ? { min: capability.seconds.min, max: capability.seconds.max, step: capability.seconds.step || 1 } : { min: VIDEO_SECONDS_MIN, max: VIDEO_SECONDS_MAX, step: 1 };
     const seconds = capability ? clampRangeSeconds(capability, config.videoSeconds) : Number(clampVideoSeconds(config.videoSeconds || "6"));
     // 时长写死的模型（min === max）没有可拖动区间，antd 的 (value-min)/(max-min) 会算出 NaN，
@@ -50,7 +54,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const dimensions = readVideoDimensions(config.size || "auto", resolution, selectedRatio);
     const supportedRatios = capability ? videoRatioOptions.filter((item) => capability.ratios.includes(item.value)) : videoRatioOptions;
     const supportedResolutions = capability ? resolutionOptions.filter((item) => capability.resolutions.includes(item.value)) : resolutionOptions;
-    const basePrice = capability ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
+    // 目录只带能力不带金额时不能估出 0 元，宁可显示「-」。
+    const basePrice = capability && !capability.priceUnknown ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
 
     // 从 /api/pricing 拉取当前用户的分组倍数，乘入预估价格使其与后端预扣费一致。
     // 取数逻辑放在 services/api/pricing，不把 apiKey 当硬前置条件——否则面板拿不到 key 时倍率会静默变成 1。
@@ -234,7 +239,8 @@ function clampRangeSeconds(capability: { seconds: { min: number; max: number; st
 function buildSecondsNote(capability: VideoModelCapability | null, seconds: number, resolution: string, fixedSeconds: boolean) {
     if (!capability) return "";
     const parts: string[] = [];
-    if (videoModelPrice(capability, resolution, false).kind === "per_call") parts.push(i18n.t("settingsPanels.video.perCall"));
+    // 价格未知时不能声称「按条计费」，那是从价格表推出来的结论。
+    if (!capability.priceUnknown && videoModelPrice(capability, resolution, false).kind === "per_call") parts.push(i18n.t("settingsPanels.video.perCall"));
     if (fixedSeconds) {
         parts.push(i18n.t("settingsPanels.video.fixedSeconds", { seconds }));
     } else {

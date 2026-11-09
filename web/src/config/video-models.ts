@@ -4,6 +4,14 @@
 // accepts. Prices are the discounted per-million-token rates, or the per-call
 // price for models billed per request. Nothing here reaches the gateway: the
 // UI uses it to offer only valid options and to estimate the charge.
+//
+// 能力数据现在有两个来源，优先级从高到低：
+//   1. 网关目录 /api/user/models/catalog（后端按插件声明 + models.capabilities 解析）
+//   2. 下面这张内置表（目录没拉到、或目录里没有这个模型时兜底）
+// 加新上游模型不需要改这里，只要后端插件/后台能力声明写好，前端就能渲染。
+// 价格目前仍只来自内置表：目录只带计费方式与示例用量，不带金额。
+import { catalogVariant, type CatalogCapability, type CatalogVariant } from "@/services/api/model-catalog";
+import { videoRatioOptions } from "@/lib/media-size";
 
 export type VideoProtocol = "ark" | "openai" | "qora";
 
@@ -22,6 +30,11 @@ export type VideoModelCapability = {
      * 能力判定、默认值回退和模型列表，避免已停用的模型被当成可用视频模型。
      */
     available?: boolean;
+    /**
+     * true 表示能力来自目录但目录没有金额：只能渲染参数，不能显示预估价。
+     * 调用方必须把价格显示成「-」而不是 ￥0，否则用户会以为免费。
+     */
+    priceUnknown?: boolean;
     /** Resolution tiers in ascending order; each maps to a 16:9 and a 9:16 size. */
     resolutions: string[];
     ratios: string[];
@@ -35,11 +48,98 @@ export type VideoModelCapability = {
     price: Record<string, VideoModelPrice> & { default?: VideoModelPrice };
 };
 
+// 界面只渲染这两档，目录里出现别的档位时不能直接塞进来（会让分辨率网格空掉）。
+const KNOWN_RESOLUTION_TIERS = ["480", "720", "1080"];
+const KNOWN_RATIOS: string[] = videoRatioOptions.map((item) => item.value);
+
+function normalizeResolutionTier(value: string) {
+    const tier = String(value || "").trim().replace(/[pP]$/, "");
+    return /^\d+$/.test(tier) ? tier : "";
+}
+
+function videoProtocolOf(value: string | undefined): VideoProtocol | null {
+    return value === "ark" || value === "openai" || value === "qora" ? value : null;
+}
+
+/**
+ * 判断一份能力声明描述的是不是视频：优先看 modality.output，没声明时按字段推断。
+ * 少了这一步，gpt-image-1 这类图片模型会被当成视频模型塞进视频选择器。
+ */
+function isVideoCapability(capability: CatalogCapability) {
+    const output = capability.modality?.output;
+    if (output && output.length) return output.includes("video");
+    return Boolean(capability.fields.resolution || capability.fields.seconds);
+}
+
+/**
+ * 把目录里的字段描述翻译成界面用的能力形状。
+ * 只做「声明了什么就渲染什么」，不给缺失项编造默认值：缺的关键项由调用方回退到内置表。
+ */
+function catalogVideoCapability(variant: CatalogVariant): VideoModelCapability | null {
+    const capability = variant.capabilities;
+    if (!capability || !isVideoCapability(capability)) return null;
+    const protocol = videoProtocolOf(capability.protocol);
+    // 协议决定提交到哪个上游，认不出来就没法发请求，交给内置表兜底。
+    if (!protocol) return null;
+
+    const resolutions = (capability.fields.resolution?.enum ?? []).map(normalizeResolutionTier).filter((tier) => KNOWN_RESOLUTION_TIERS.includes(tier));
+    const ratios = (capability.fields.ratio?.enum ?? []).filter((ratio) => KNOWN_RATIOS.includes(ratio));
+    const secondsField = capability.fields.seconds;
+    const seconds = secondsField
+        ? {
+              min: Number(secondsField.min ?? secondsField.default ?? 0),
+              max: Number(secondsField.max ?? secondsField.default ?? 0),
+              step: secondsField.step && secondsField.step > 0 ? secondsField.step : 1,
+          }
+        : null;
+    if (!resolutions.length || !ratios.length || !seconds || !Number.isFinite(seconds.min) || !Number.isFinite(seconds.max) || seconds.max < seconds.min) {
+        return null;
+    }
+    const defaultSeconds = Number(secondsField?.default);
+    const limitOf = (key: string) => {
+        const value = Number(capability.fields[key]?.max);
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    };
+
+    return {
+        label: variant.display_name || variant.model,
+        protocol,
+        priceUnknown: true,
+        resolutions,
+        ratios,
+        seconds,
+        defaultSeconds: Number.isFinite(defaultSeconds) ? Math.min(seconds.max, Math.max(seconds.min, defaultSeconds)) : seconds.min,
+        maxImages: limitOf("max_images"),
+        maxVideos: limitOf("max_videos"),
+        maxAudios: limitOf("max_audios"),
+        price: {},
+    };
+}
+
+function builtinCapability(name: string) {
+    return Object.prototype.hasOwnProperty.call(videoModelCapabilities, name) ? videoModelCapabilities[name] : null;
+}
+
 export function videoModelCapability(model: string): VideoModelCapability | null {
     // model 可能带渠道前缀 "channelId::modelName"，先剥掉前缀。
     const name = model.includes("::") ? model.slice(model.lastIndexOf("::") + 2) : model;
-    return Object.prototype.hasOwnProperty.call(videoModelCapabilities, name) ? videoModelCapabilities[name] : null;
+    const builtin = builtinCapability(name);
+    const variant = catalogVariant(name);
+    const fromCatalog = variant ? catalogVideoCapability(variant) : null;
+    if (!fromCatalog) return builtin;
+    if (!builtin) return fromCatalog;
+    // 目录里出现了这个模型，说明它现在是可用的——内置表里的 available:false 可能已经过期。
+    // 能力以目录为准，价格仍然只能用内置表的（目录不带金额）。
+    return {
+        ...builtin,
+        ...fromCatalog,
+        label: variant?.display_name || builtin.label,
+        available: true,
+        priceUnknown: false,
+        price: builtin.price,
+    };
 }
+
 
 export function videoModelPrice(capability: VideoModelCapability, resolution: string, hasReferenceVideo: boolean): VideoModelPrice {
     const entry = capability.price[resolution] || capability.price.default;

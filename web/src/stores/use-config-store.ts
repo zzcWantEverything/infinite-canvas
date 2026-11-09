@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 import { videoModelCapability } from "@/config/video-models";
+import { catalogGroupOf, catalogVariant } from "@/services/api/model-catalog";
 
 import i18n from "@/i18n";
 
@@ -477,7 +478,14 @@ export function modelOptionLabel(config: AiConfig, value: string) {
     const channel = config.channels.find((item) => item.id === decoded.channelId);
     // 如果能力表里有友好名称（如 "Seedance 2.5"），优先显示。
     const cap = videoModelCapability(decoded.model);
-    const displayName = cap?.label || decoded.model;
+    // 目录里的 display_name 也是运营维护的展示名；没有能力声明的模型（如某些图片模型）靠它兜底。
+    let displayName = cap?.label || catalogVariant(decoded.model)?.display_name || decoded.model;
+    // 单看「竖屏特惠」不知道是哪款模型，所以只要卡片名和线路名不同就补上前缀。
+    // 不管这张卡片有几个变体——只有一条线路的卡片同样需要（如 Seedance 2.0 Mini）。
+    const group = catalogGroupOf(decoded.model);
+    if (group && group.display_name && !displayName.startsWith(group.display_name)) {
+        displayName = `${group.display_name} · ${displayName}`;
+    }
     if (!channel) return displayName;
     // 只有同名模型真的分布在多个渠道时才补渠道名做区分，单渠道时不显示冗余后缀。
     const sharedAcrossChannels = config.channels.filter((item) => item.models.some((model) => model.name === decoded.model)).length;
