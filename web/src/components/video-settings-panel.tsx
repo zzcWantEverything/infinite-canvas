@@ -6,10 +6,11 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
-import { estimateVideoPrice, videoModelCapability, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
+import { estimateVideoPrice, estimateVideoTokens, videoModelCapability, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
+import { estimateModelPrice } from "@/lib/model-price";
 import { reportApiError } from "@/services/api/http";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
-import { fetchGroupRatio, type PricingRatioSnapshot } from "@/services/api/pricing";
+import { fetchPricingSnapshot, type PricingSnapshot } from "@/services/api/pricing";
 import { modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
 
 const resolutionOptions = [
@@ -54,18 +55,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const dimensions = readVideoDimensions(config.size || "auto", resolution, selectedRatio);
     const supportedRatios = capability ? videoRatioOptions.filter((item) => capability.ratios.includes(item.value)) : videoRatioOptions;
     const supportedResolutions = capability ? resolutionOptions.filter((item) => capability.resolutions.includes(item.value)) : resolutionOptions;
+    // 价格优先按 /api/pricing 下发的计费表达式算，与后端扣费用同一份规则；
+    // 表达式算不出来（引用了面板不知道的用量）时才回退内置价格表。
     // 目录只带能力不带金额时不能估出 0 元，宁可显示「-」。
-    const basePrice = capability && !capability.priceUnknown ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
-
-    // 从 /api/pricing 拉取当前用户的分组倍数，乘入预估价格使其与后端预扣费一致。
-    // 取数逻辑放在 services/api/pricing，不把 apiKey 当硬前置条件——否则面板拿不到 key 时倍率会静默变成 1。
-    const [ratioSnapshot, setRatioSnapshot] = useState<PricingRatioSnapshot | null>(null);
+    const [pricingSnapshot, setPricingSnapshot] = useState<PricingSnapshot | null>(null);
     useEffect(() => {
         if (!capability) return;
         let alive = true;
-        fetchGroupRatio(config.baseUrl, config.apiKey)
+        fetchPricingSnapshot(config.baseUrl, config.apiKey)
             .then((snapshot) => {
-                if (alive) setRatioSnapshot(snapshot);
+                if (alive) setPricingSnapshot(snapshot);
             })
             .catch(reportApiError);
         return () => {
@@ -73,9 +72,17 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         };
     }, [capability, config.baseUrl, config.apiKey]);
 
-    const groupRatio = ratioSnapshot?.ratio ?? 1;
+    const serverPrice = useMemo(() => {
+        const entry = pricingSnapshot?.models.get(modelName);
+        if (!entry) return null;
+        return estimateModelPrice(entry, { seconds, resolution, tokens: estimateVideoTokens(seconds, dimensions.width, dimensions.height) });
+    }, [pricingSnapshot, modelName, seconds, resolution, dimensions.width, dimensions.height]);
+    const builtinPrice = capability && !capability.priceUnknown ? estimateVideoPrice(capability, { seconds, resolution, hasReferenceVideo: false }) : null;
+    const basePrice = serverPrice ?? builtinPrice;
+
+    const groupRatio = pricingSnapshot?.ratio ?? 1;
     const price = basePrice !== null ? basePrice * groupRatio : null;
-    const priceHint = ratioSnapshot ? t("settingsPanels.video.groupRatio", { group: ratioSnapshot.group, ratio: formatRatio(groupRatio) }) : "";
+    const priceHint = pricingSnapshot ? t("settingsPanels.video.groupRatio", { group: pricingSnapshot.group, ratio: formatRatio(groupRatio) }) : "";
     const applySize = (nextResolution: string, ratio: string) => {
         onConfigChange("vquality", nextResolution);
         onConfigChange("size", computeVideoSize(nextResolution, ratio));

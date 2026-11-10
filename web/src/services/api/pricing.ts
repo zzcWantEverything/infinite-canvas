@@ -1,7 +1,8 @@
-// 分组倍率（/api/pricing → group_ratio）的共享读取。
+// /api/pricing 的共享读取：分组倍率 + 每个模型的计费表达式。
 //
-// 后端的实际扣费是 `单价 × 分组倍率`（relay/helper/price.go: modelPrice * QuotaPerUnit * GroupRatio），
-// 所以前端预估价格必须乘上同一个倍率，否则显示值会低于真实扣费。
+// 后端的实际扣费是 `表达式结果 × 分组倍率`（relay/helper/price.go: modelPrice * QuotaPerUnit * GroupRatio，
+// 任务类模型是 relay/relay_task.go 里的 cost * QuotaPerUnit * GroupRatio），
+// 所以前端预估价格必须用同一份表达式、乘同一个倍率，否则显示值和真实扣费会脱钩。
 //
 // 这里的取数刻意不依赖 AiConfig.apiKey：/api/pricing 在 header nav 里默认是「免登录」的公开接口，
 // 只要同源请求就能拿到结果。此前的实现把 apiKey 当成硬前置条件，一旦某个面板拿到的 config 没有
@@ -15,8 +16,39 @@ export type PricingRatioSnapshot = {
     group: string;
 };
 
+/** 计费表达式引用的一个用量字段（后端 `jsplugin.UsageFieldSchema` 的线上形状）。 */
+export type PricingUsageField = {
+    type?: string;
+    unit?: string;
+    enum?: string[];
+};
+
+/** /api/pricing → data[] 里与“算钱”有关的部分。 */
+export type PricingModelEntry = {
+    model: string;
+    /** `tiered_expr` 走表达式，其余走 model_price / model_ratio。 */
+    billingMode: string;
+    billingExpr: string;
+    /** 按次价格；0 表示这个模型不按次计费。 */
+    modelPrice: number;
+    usageSchema: Record<string, PricingUsageField>;
+};
+
+export type PricingSnapshot = PricingRatioSnapshot & {
+    models: Map<string, PricingModelEntry>;
+};
+
+type RawPricingModel = {
+    model_name?: unknown;
+    model_price?: unknown;
+    billing_mode?: unknown;
+    billing_expr?: unknown;
+    billing_usage_schema?: unknown;
+};
+
 type RawPricingPayload = {
     success?: boolean;
+    data?: unknown;
     group_ratio?: Record<string, unknown>;
     usable_group?: Record<string, unknown>;
     auto_groups?: unknown;
@@ -24,9 +56,9 @@ type RawPricingPayload = {
 
 const CACHE_TTL = 5 * 60 * 1000;
 
-let cachedSnapshot: PricingRatioSnapshot | null = null;
+let cachedSnapshot: PricingSnapshot | null = null;
 let cachedAt = 0;
-let inflight: Promise<PricingRatioSnapshot | null> | null = null;
+let inflight: Promise<PricingSnapshot | null> | null = null;
 
 /**
  * 候选地址：同源相对路径优先。
@@ -60,6 +92,24 @@ export function pickGroupRatio(payload: RawPricingPayload | null | undefined): P
     return null;
 }
 
+/** 把 /api/pricing 的 data[] 索引成「模型名 → 计费规则」，模型没配表达式时也会留一条按次价格记录。 */
+export function buildPricingModels(payload: RawPricingPayload | null | undefined): Map<string, PricingModelEntry> {
+    const models = new Map<string, PricingModelEntry>();
+    const list = Array.isArray(payload?.data) ? payload.data : [];
+    for (const raw of list as RawPricingModel[]) {
+        const name = typeof raw?.model_name === "string" ? raw.model_name : "";
+        if (!name) continue;
+        models.set(name, {
+            model: name,
+            billingMode: typeof raw.billing_mode === "string" ? raw.billing_mode : "",
+            billingExpr: typeof raw.billing_expr === "string" ? raw.billing_expr : "",
+            modelPrice: typeof raw.model_price === "number" && Number.isFinite(raw.model_price) ? raw.model_price : 0,
+            usageSchema: raw.billing_usage_schema && typeof raw.billing_usage_schema === "object" ? (raw.billing_usage_schema as Record<string, PricingUsageField>) : {},
+        });
+    }
+    return models;
+}
+
 async function requestPricing(url: string, apiKey?: string) {
     const headers: Record<string, string> = { Accept: "application/json" };
     const trimmedKey = (apiKey || "").trim();
@@ -72,10 +122,10 @@ async function requestPricing(url: string, apiKey?: string) {
 }
 
 /**
- * 读取当前用户的分组倍率。失败返回 null（调用方按 1 兜底），且不缓存失败结果，
- * 下次挂载会重试。同一个 baseUrl 只发一轮请求，避免多个面板各拉一次。
+ * 读取分组倍率与整张模型价目表。失败返回 null（调用方按 1 兜底、价格回退内置表），
+ * 且不缓存失败结果，下次挂载会重试。同一个 baseUrl 只发一轮请求，避免多个面板各拉一次。
  */
-export function fetchGroupRatio(baseUrl: string, apiKey?: string): Promise<PricingRatioSnapshot | null> {
+export function fetchPricingSnapshot(baseUrl: string, apiKey?: string): Promise<PricingSnapshot | null> {
     if (cachedSnapshot && Date.now() - cachedAt < CACHE_TTL) return Promise.resolve(cachedSnapshot);
     if (inflight) return inflight;
 
@@ -89,12 +139,13 @@ export function fetchGroupRatio(baseUrl: string, apiKey?: string): Promise<Prici
     const task = (async () => {
         for (const attempt of attempts) {
             try {
-                const snapshot = pickGroupRatio(await requestPricing(attempt.url, attempt.apiKey));
-                if (snapshot) {
-                    cachedSnapshot = snapshot;
-                    cachedAt = Date.now();
-                    return snapshot;
-                }
+                const payload = await requestPricing(attempt.url, attempt.apiKey);
+                const ratio = pickGroupRatio(payload);
+                if (!ratio) continue;
+                const snapshot: PricingSnapshot = { ...ratio, models: buildPricingModels(payload) };
+                cachedSnapshot = snapshot;
+                cachedAt = Date.now();
+                return snapshot;
             } catch {
                 // 换下一个候选地址/鉴权方式；全部失败时由调用方兜底为 1。
             }
@@ -108,8 +159,8 @@ export function fetchGroupRatio(baseUrl: string, apiKey?: string): Promise<Prici
     return inflight;
 }
 
-/** 切换账号或后台改了倍率后需要重取。 */
-export function invalidateGroupRatioCache() {
+/** 切换账号或后台改了倍率/价格后需要重取。 */
+export function invalidatePricingCache() {
     cachedSnapshot = null;
     cachedAt = 0;
     inflight = null;
