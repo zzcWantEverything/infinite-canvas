@@ -1,11 +1,10 @@
 import type { ReactNode } from "react";
 import { App, Avatar, Dropdown } from "antd";
-import { FolderOpen, Globe, LogOut, Moon, Settings2, Sun, User } from "lucide-react";
+import { FolderOpen, Globe, LogOut, Moon, Sun, User } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { changeAppLocale, type AppLocale } from "@/i18n";
-import { useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 
@@ -19,7 +18,6 @@ export function UserMenuButton() {
     const { message } = App.useApp();
     const session = useUserStore((state) => state.session);
     const clearSession = useUserStore((state) => state.clearSession);
-    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = useThemeStore((state) => state.theme);
     const setTheme = useThemeStore((state) => state.setTheme);
 
@@ -62,12 +60,6 @@ export function UserMenuButton() {
             icon: menuIcon(<FolderOpen className="size-4" />),
             label: "我的资产",
             onClick: () => navigate("/assets"),
-        },
-        {
-            key: "config",
-            icon: menuIcon(<Settings2 className="size-4" />),
-            label: "配置",
-            onClick: () => openConfigDialog(false),
         },
         { type: "divider" as const },
         {

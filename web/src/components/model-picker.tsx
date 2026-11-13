@@ -10,6 +10,7 @@ import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
 import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
+import { groupModelOptions } from "@/lib/model-picker-groups";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -49,25 +50,26 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
     const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels : configOptions;
 
-    // 网关目录把同一款模型的多条线路归到一张卡片（variant_group）。这里按组折叠：
-    // 多条线路的组一定加标题；单条线路的组只有在「卡片名 ≠ 线路名」时才加标题
-    // （例如 Seedance 2.0 Mini 只有一条线路，不加标题就分不清它属于哪张卡片）。
+    // 网关目录把同一款模型的多条线路归到一张卡片（variant_group），运营也会直接在展示名里
+    // 写分组（「高清视觉 · sd2.5 1080P」）。两种写法都按同一套规则折叠：前缀做组标题，
+    // 条目只显示线路名，避免同一串文字出现两次。
     const catalogVersion = useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
-    const optionGroups = useMemo(() => {
-        const groups = new Map<string, { key: string; label: string; models: string[]; fromCatalog: boolean }>();
-        for (const option of options) {
-            const name = modelOptionName(option);
-            const group = catalogGroupOf(name);
-            const key = group?.model || name;
-            const existing = groups.get(key);
-            if (existing) {
-                existing.models.push(option);
-                continue;
-            }
-            groups.set(key, { key, label: group?.display_name || name, models: [option], fromCatalog: Boolean(group) });
-        }
-        return Array.from(groups.values());
-    }, [options, catalogVersion]);
+    const optionGroups = useMemo(
+        () =>
+            groupModelOptions(
+                options.map((option) => {
+                    const name = modelOptionName(option);
+                    const card = catalogGroupOf(name);
+                    return {
+                        value: option,
+                        name,
+                        card: card ? { key: card.model, displayName: card.display_name, variantCount: card.variants.length } : null,
+                        variantDisplayName: catalogVariant(name)?.display_name ?? null,
+                    };
+                }),
+            ),
+        [options, catalogVersion],
+    );
 
     // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
     const current = useMemo(() => {
@@ -134,23 +136,20 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             >
                 {optionGroups.length ? (
                     optionGroups.map((group) => {
-                        // 组内条目只显示线路名，卡片名交给组标题，避免同一串文字出现两次。
-                        const variantLabel = (model: string) => catalogVariant(modelOptionName(model))?.display_name;
-                        const only = group.models[0];
-                        const needsHeader = group.models.length > 1 || (group.fromCatalog && group.label !== (variantLabel(only) || modelOptionLabel(config, only)));
-                        if (!needsHeader) {
+                        if (!group.header) {
+                            const only = group.items[0];
                             return (
-                                <SelectItem key={only} value={only} textValue={modelOptionLabel(config, only)}>
-                                    <ModelLabel config={config} model={only} />
+                                <SelectItem key={only.value} value={only.value} textValue={modelOptionLabel(config, only.value)}>
+                                    <ModelLabel config={config} model={only.value} />
                                 </SelectItem>
                             );
                         }
                         return (
                             <SelectGroup key={group.key}>
                                 <SelectLabel>{group.label}</SelectLabel>
-                                {group.models.map((model) => (
-                                    <SelectItem key={model} value={model} textValue={modelOptionLabel(config, model)}>
-                                        <ModelLabel config={config} model={model} label={variantLabel(model)} />
+                                {group.items.map((item) => (
+                                    <SelectItem key={item.value} value={item.value} textValue={modelOptionLabel(config, item.value)}>
+                                        <ModelLabel config={config} model={item.value} label={item.label} />
                                     </SelectItem>
                                 ))}
                             </SelectGroup>

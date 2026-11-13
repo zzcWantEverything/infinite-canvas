@@ -46,6 +46,7 @@ const NODE_TYPE_ICON: Record<string, typeof Square> = {
 const STATUS_COLOR: Record<string, string> = {
     success: "#22c55e",
     loading: "#f59e0b",
+    pending: "#38bdf8",
     error: "#ef4444",
     idle: "transparent",
 };

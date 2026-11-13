@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clock3, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -53,7 +53,8 @@ type CanvasNodeProps = {
     onDownloadBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onDeleteBatchImage?: (nodeId: string, imageId: string) => void;
-    onRetry?: (node: CanvasNodeData) => void;
+    /** 可以返回 Promise：「查询进度」要拿它控制按钮的忙碌态。 */
+    onRetry?: (node: CanvasNodeData) => void | Promise<void>;
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
     onSelectReference?: (nodeId: string) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
@@ -73,7 +74,7 @@ type NodeContentRendererProps = {
     onContentChange: (nodeId: string, content: string) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
-    onRetry?: (node: CanvasNodeData) => void;
+    onRetry?: (node: CanvasNodeData) => void | Promise<void>;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (itemId: string) => void;
     onDuplicateBatchImage?: (imageId: string) => void;
@@ -461,6 +462,7 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.isBatchRoot && props.node.type === CanvasNodeType.Image) return <ImageNodeContent {...props} />;
     if (props.node.type === CanvasNodeType.Text && props.node.metadata?.texts?.length && (props.node.metadata.status !== "error" || props.node.metadata.texts.some((text) => text.content))) return <TextContent {...props} />;
     if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
+    if (props.node.metadata?.status === "pending") return <PendingContent node={props.node} theme={props.theme} onQuery={props.onRetry} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
@@ -526,6 +528,48 @@ function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "
             >
                 <RefreshCw className="size-3.5" />
                 {t("canvas.node.retry")}
+            </button>
+        </div>
+    );
+}
+
+/**
+ * 任务还在上游跑，但前端已经不再干等（超过轮询预算）。
+ * 和 ErrorContent 的区别：不报错、不提供「重试」（重试会新建一条任务），
+ * 只保留任务 ID 并提供「查询进度」——查到时节点会自己变回生成中再变成功。
+ *
+ * 注意：后台每 15 秒本来就在自动查，所以按钮不能只转发给那条循环（循环里会被
+ * 节流直接吃掉，点下去毫无反应）。这里必须真正发起一次查询，并且把忙碌态画出来。
+ */
+function PendingContent({ node, theme, onQuery }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry"> & { onQuery?: (node: CanvasNodeData) => void | Promise<void> }) {
+    const { t } = useTranslation();
+    const [querying, setQuerying] = useState(false);
+    return (
+        <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
+            <div className="flex size-10 items-center justify-center rounded-full border-2" style={{ borderColor: theme.node.stroke }}>
+                <Clock3 className="size-4" style={{ color: theme.node.activeStroke }} />
+            </div>
+            <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t("canvas.node.backgroundPending")}</div>
+            {node.metadata?.videoTaskId ? <div className="text-[11px]" style={{ color: theme.node.muted }}>{t("canvas.nodeToolbar.videoTaskId")}: {node.metadata.videoTaskId}</div> : null}
+            <button
+                type="button"
+                disabled={querying}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02] disabled:cursor-default disabled:opacity-70 disabled:hover:scale-100"
+                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                onClick={async (event) => {
+                    event.stopPropagation();
+                    if (querying) return;
+                    setQuerying(true);
+                    try {
+                        await onQuery?.(node);
+                    } finally {
+                        setQuerying(false);
+                    }
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+            >
+                <RefreshCw className={querying ? "size-3.5 animate-spin" : "size-3.5"} />
+                {querying ? t("canvas.node.queryTaskBusy") : t("canvas.node.queryTask")}
             </button>
         </div>
     );

@@ -110,7 +110,7 @@ export default function ProfilePage() {
                 <div className="mt-3 flex items-center gap-1 text-xs text-stone-400 dark:text-stone-500">
                     需要兑换码？
                     <a
-                        href="https://wzyp.cn/item/vz2wpe"
+                        href="https://wzyp.cn/shop/TBVMF39E"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-0.5 text-stone-500 underline-offset-2 transition hover:text-stone-800 hover:underline dark:text-stone-400 dark:hover:text-stone-200"

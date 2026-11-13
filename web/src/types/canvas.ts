@@ -21,7 +21,8 @@ export enum CanvasNodeType {
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
 export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 
-export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
+/** pending 只用于视频节点：任务已交出去但前端不再干等，task ID 保留可续查。 */
+export type CanvasNodeStatus = "idle" | "success" | "loading" | "pending" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
@@ -82,7 +83,8 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     videoTaskId?: string;
-    videoTaskProvider?: "openai" | "gemini";
+    /** 必须存真实 provider：断线重连后要按它选回对应的查询接口（ark/qora 与 openai 不同）。 */
+    videoTaskProvider?: "openai" | "gemini" | "ark" | "qora";
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
 };

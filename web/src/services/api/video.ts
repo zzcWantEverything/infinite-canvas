@@ -50,16 +50,38 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
     return waitForVideoGenerationTask(config, await createVideoGenerationTask(config, prompt, references, options), options);
 }
 
+/**
+ * 轮询节奏与后端保持一致：new-api 的后台任务每 15 秒才向上游刷新一次状态
+ *（controller/system_task_handlers.go 的 asyncTaskPollHandler.Interval），
+ * 前端比这更密只会空转，既不给用户更早的结果，又多打了网关。
+ *
+ * 等满 90 分钟仍没结束时不再判失败——上游 Seedance 2.5 长镜头实测能跑 1 小时以上。
+ * 这时抛 VideoTaskPending，由画布把节点切成「后台运行中」并保留 task ID，随时可续查。
+ */
+export const VIDEO_POLL_INTERVAL = 15000;
+export const VIDEO_POLL_BACKGROUND_AFTER = 90 * 60 * 1000;
+
+export function isVideoTaskPending(error: unknown) {
+    return error instanceof Error && error.name === "VideoTaskPending";
+}
+
+/** 任务还在上游跑，但前端不再干等：节点转后台运行中，task ID 保留。 */
+function videoTaskPending() {
+    const error = new Error(apiText("videoTimeout", { provider: "" }));
+    error.name = "VideoTaskPending";
+    return error;
+}
+
 export async function waitForVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult> {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    const deadline = Date.now() + VIDEO_POLL_BACKGROUND_AFTER;
+    for (;;) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "failed") throw videoTaskFailed(state.error);
-        if (attempt === 119) throw new Error(apiText("videoTimeout", { provider: "" }));
-        await delay(2500, options?.signal);
+        if (Date.now() >= deadline) throw videoTaskPending();
+        await delay(VIDEO_POLL_INTERVAL, options?.signal);
     }
-    throw new Error(apiText("videoTimeout", { provider: "" }));
 }
 
 export function isVideoTaskFailed(error: unknown) {
@@ -155,13 +177,28 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
     const images = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    // 参考素材要全传：网关上的 miniKey 等视频渠道按 images[] / videos[] / audios[] 收多份，
+    // 提示词里的 @图1/@图2 就按上传顺序编号，漏传会让序号越界直接报错。
+    // 但 OpenAI 官方接口只认单个 input_reference，所以数量一律以目录声明的上限为准：
+    // 目录没声明（未接入网关的模型）就退回单图，保持原行为。
+    const capability = videoModelCapability(model);
+    const maxImages = Math.max(1, capability?.maxImages || 1);
+    const maxVideos = capability?.maxVideos || 0;
+    const maxAudios = capability?.maxAudios || 0;
     const body = new FormData();
     body.append("model", modelOptionName(model));
     body.append("prompt", prompt);
     body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
     body.append("size", mapVideoSize(normalizeVideoSize(config.size, config.vquality) || "1280x720"));
-    // 上游只支持 input_reference（单文件），不支持 first_frame/last_frame/image[]/video[]/audio[]
-    if (images[0]) body.append("input_reference", images[0], "ref.png");
+    images.slice(0, maxImages).forEach((file, index) => body.append("input_reference", file, referenceFileName(file, index, "png")));
+    if (maxVideos > 0) {
+        const videos = await Promise.all((options?.videos || []).slice(0, maxVideos).map((video) => referenceMediaToFile(video, "ref.mp4", "invalidReferenceVideo", options)));
+        videos.forEach((file, index) => body.append("videos", file, referenceFileName(file, index, "mp4")));
+    }
+    if (maxAudios > 0) {
+        const audios = await Promise.all((options?.audios || []).slice(0, maxAudios).map((audio) => referenceMediaToFile(audio, "ref.mp3", "invalidReferenceAudio", options)));
+        audios.forEach((file, index) => body.append("audios", file, referenceFileName(file, index, "mp3")));
+    }
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
@@ -169,6 +206,16 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
     }
+}
+
+/**
+ * 上传文件名必须带正确扩展名：图片按 mime 落 png/jpg/webp，视频音频同理。
+ * 上游按扩展名 + 内容双重校验，全部叫 ref.png 时非 png 素材会被判成「不是有效图片」。
+ */
+function referenceFileName(file: File, index: number, fallbackExtension: string) {
+    const fromType = (file.type || "").split("/")[1] || "";
+    const extension = fromType.replace(/^x-/, "").replace("mpeg", "mp3") || fallbackExtension;
+    return `ref${index + 1}.${extension}`;
 }
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -214,16 +261,25 @@ async function createGeminiVideoTask(config: AiConfig, model: string, prompt: st
     if (videos[0]) instance.video = await fileToGeminiInline(videos[0]);
     if (audios[0]) instance.audio = await fileToGeminiInline(audios[0]);
     try {
-        const created = unwrapEnvelope((await axios.post<ApiEnvelope<GeminiVideoOperation>>(geminiVideoUrl(config, model, "predictLongRunning"), {
-            instances: [instance],
-            parameters: {
-                aspectRatio: videoAspectRatio(config.size),
-                durationSeconds: Number(normalizeVideoSeconds(config.videoSeconds)) || 8,
-                resolution: normalizeVideoResolution(config.vquality),
-                generateAudio: boolConfig(config.videoGenerateAudio, true),
-                addWatermark: boolConfig(config.videoWatermark, false),
-            },
-        }, { headers: geminiVideoHeaders(config), signal: options?.signal })).data, apiText("noVideoTask"));
+        const created = unwrapEnvelope(
+            (
+                await axios.post<ApiEnvelope<GeminiVideoOperation>>(
+                    geminiVideoUrl(config, model, "predictLongRunning"),
+                    {
+                        instances: [instance],
+                        parameters: {
+                            aspectRatio: videoAspectRatio(config.size),
+                            durationSeconds: Number(normalizeVideoSeconds(config.videoSeconds)) || 8,
+                            resolution: normalizeVideoResolution(config.vquality),
+                            generateAudio: boolConfig(config.videoGenerateAudio, true),
+                            addWatermark: boolConfig(config.videoWatermark, false),
+                        },
+                    },
+                    { headers: geminiVideoHeaders(config), signal: options?.signal },
+                )
+            ).data,
+            apiText("noVideoTask"),
+        );
         if (!created.name) throw new Error(apiText("noVideoTaskId"));
         return { id: created.name, provider: "gemini", model };
     } catch (error) {
@@ -259,13 +315,22 @@ async function createArkVideoTask(config: AiConfig, model: string, prompt: strin
     const resolution = normalizeResolutionTier(capability, config.vquality);
     const seconds = clampArkSeconds(capability, config.videoSeconds);
     try {
-        const created = unwrapEnvelope((await axios.post<ApiEnvelope<VideoResponse>>(arkVideoUrl(config, "/contents/generations/tasks"), {
-            model: modelOptionName(model),
-            content,
-            duration: seconds,
-            ratio: capability.ratios.includes(videoAspectRatio(config.size)) ? videoAspectRatio(config.size) : capability.ratios[0],
-            resolution: `${resolution}p`,
-        }, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data, apiText("noVideoTask"));
+        const created = unwrapEnvelope(
+            (
+                await axios.post<ApiEnvelope<VideoResponse>>(
+                    arkVideoUrl(config, "/contents/generations/tasks"),
+                    {
+                        model: modelOptionName(model),
+                        content,
+                        duration: seconds,
+                        ratio: capability.ratios.includes(videoAspectRatio(config.size)) ? videoAspectRatio(config.size) : capability.ratios[0],
+                        resolution: `${resolution}p`,
+                    },
+                    { headers: aiHeaders(config, "application/json"), signal: options?.signal },
+                )
+            ).data,
+            apiText("noVideoTask"),
+        );
         if (!created?.id) throw new Error(apiText("noVideoTaskId"));
         return { id: created.id, provider: "ark", model };
     } catch (error) {
@@ -275,7 +340,10 @@ async function createArkVideoTask(config: AiConfig, model: string, prompt: strin
 
 async function pollArkVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const state = unwrapEnvelope((await axios.get<ApiEnvelope<VideoResponse>>(arkVideoUrl(config, `/contents/generations/tasks/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data, apiText("videoTaskQueryFailed"));
+        const state = unwrapEnvelope(
+            (await axios.get<ApiEnvelope<VideoResponse>>(arkVideoUrl(config, `/contents/generations/tasks/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data,
+            apiText("videoTaskQueryFailed"),
+        );
         const url = videoResultUrl(state);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: readApiErrorMessage(state.error?.message) || apiText("videoGenerationFailed") };
@@ -357,7 +425,9 @@ async function qoraUploadImageRef(config: AiConfig, image: ReferenceImage, role:
         try {
             const dataUrl = await imageToDataUrl(image);
             if (dataUrl.startsWith("data:")) blob = await (await fetch(dataUrl)).blob();
-        } catch { /* ignore */ }
+        } catch {
+            /* ignore */
+        }
     }
     // Priority 3: raw candidate
     if (!blob) {
@@ -398,6 +468,22 @@ function qoraApiUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
     return buildApiUrl(baseUrl, path);
 }
 
+// Qora 对参考素材有时长上限：同一次任务里所有参考视频 + 参考音频的时长**合计**
+// 不能超过 30 秒（视频和音频合并计算，不是各自算）。超了上游会拒绝，白白上传
+// 一遍素材再失败，所以在真正上传之前就拦住。
+// durationMs 缺失的素材按 0 计，不猜测时长。
+const QORA_REFERENCE_TOTAL_SECONDS = 30;
+
+function assertQoraReferenceDuration(videos: ReferenceVideo[], audios: ReferenceAudio[]) {
+    const totalSeconds = [...videos, ...audios].reduce((total, item) => {
+        const ms = Number(item.durationMs);
+        return total + (Number.isFinite(ms) && ms > 0 ? ms / 1000 : 0);
+    }, 0);
+    if (totalSeconds > QORA_REFERENCE_TOTAL_SECONDS) {
+        throw new Error(apiText("referenceMediaTotalTooLong", { limit: QORA_REFERENCE_TOTAL_SECONDS, actual: Math.round(totalSeconds * 10) / 10 }));
+    }
+}
+
 async function createQoraVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
     const capability = videoModelCapability(model);
     const rawModel = modelOptionName(model);
@@ -409,6 +495,7 @@ async function createQoraVideoTask(config: AiConfig, model: string, prompt: stri
     const refImages = references.slice(0, capability?.maxImages ?? 9);
     const refVideos = (options?.videos || []).slice(0, capability?.maxVideos ?? 0);
     const refAudios = (options?.audios || []).slice(0, capability?.maxAudios ?? 0);
+    assertQoraReferenceDuration(refVideos, refAudios);
 
     let qoraRefs: { id: string; role: string }[] = [];
     if (refImages.length || refVideos.length || refAudios.length) {
