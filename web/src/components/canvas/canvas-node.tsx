@@ -4,6 +4,7 @@ import { ChevronRight, Clock3, Copy, Download, Group, Image as ImageIcon, Music2
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
+import { humanizeUpstreamError } from "@/lib/upstream-error";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -520,9 +521,12 @@ function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
 
 function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
     const { t } = useTranslation();
+    // 画布把 errorDetails 存进了项目数据：老节点上留着的上游原始报错（含渠道号、进货价）
+    // 也要在这里兜一次，否则刷新后又会原样显示出来。
+    const errorText = node.metadata?.errorDetails ? humanizeUpstreamError(node.metadata.errorDetails) : "";
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
-            <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || t("canvas.node.failed")}</div>
+            <div className="text-xs leading-5 text-red-300">{errorText || t("canvas.node.failed")}</div>
             <button
                 type="button"
                 className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"

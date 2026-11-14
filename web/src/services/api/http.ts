@@ -1,6 +1,7 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
 
 import i18n from "@/i18n";
+import { humanizeUpstreamError } from "@/lib/upstream-error";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
@@ -64,12 +65,12 @@ export function toApiError(error: unknown, fallback = apiText("requestFailed")):
         if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") return new ApiError(apiText("requestTimeout"), "timeout");
         if (!error.response) return new ApiError(apiText("networkFailed"), "network");
         const status = error.response.status;
-        const apiMessage = readApiErrorMessage(error.response.data);
+        const apiMessage = humanizeUpstreamError(readApiErrorMessage(error.response.data));
         if (apiMessage) return new ApiError(apiMessage, status === 401 ? "auth" : "http", status);
         return new ApiError(readStatusError(status, "") || error.message || fallback, status === 401 ? "auth" : "http", status);
     }
     if (error instanceof DOMException && error.name === "AbortError") return new ApiError(apiText("requestCanceled"), "payload");
-    if (error instanceof Error) return new ApiError(readApiErrorMessage(error.message) || error.message || fallback, "payload");
+    if (error instanceof Error) return new ApiError(humanizeUpstreamError(readApiErrorMessage(error.message) || error.message || fallback), "payload");
     return new ApiError(fallback, "payload");
 }
 
@@ -79,7 +80,7 @@ export function readAxiosError(error: unknown, fallback: string) {
     if (error instanceof DOMException && error.name === "AbortError") return apiText("requestCanceled");
     if (error instanceof ApiError) return error.message;
     if (axios.isAxiosError(error)) return toApiError(error, fallback).message;
-    return error instanceof Error ? readApiErrorMessage(error.message) || error.message : fallback;
+    return error instanceof Error ? humanizeUpstreamError(readApiErrorMessage(error.message) || error.message) : fallback;
 }
 
 let errorNotifier: ((text: string) => void) | null = null;
