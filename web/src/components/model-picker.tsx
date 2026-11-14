@@ -257,7 +257,13 @@ function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio:
     if (oneSecond === null || !Number.isFinite(oneSecond) || oneSecond <= 0) return null;
     const twoSeconds = estimateModelPrice(entry, { seconds: 2, resolution });
     const byDuration = twoSeconds !== null && twoSeconds > oneSecond;
-    return { unit: byDuration ? "second" : "call", value: oneSecond * ratio };
+
+    // 单位以上游能力声明为准（billingUnit: second / request / token）。拿不到目录时
+    // 才退回「1 秒和 2 秒是否同价」：这种启发式对「起步价 + 之后按秒」的阶梯档位
+    // （如 sd2.5-CD 480P：≤5 秒一口价 1.5，之后每秒 +0.28）会把按秒误判成按次。
+    const billingUnit = catalogVariant(modelName)?.capabilities?.billingUnit;
+    const unit: "call" | "second" = billingUnit === "second" ? "second" : billingUnit === "request" || billingUnit === "token" ? "call" : byDuration ? "second" : "call";
+    return { unit, value: oneSecond * ratio };
 }
 
 /** 0.045 → "0.045"，0.42 → "0.42"，42.9 → "42.90"：金额最小单位是分，≥0.1 一律两位。 */
