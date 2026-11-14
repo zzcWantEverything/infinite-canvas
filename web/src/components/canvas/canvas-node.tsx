@@ -134,6 +134,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const [titleDraft, setTitleDraft] = useState(data.title || "");
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
+    // 只有模型生成的视频才有失效风险：上传/拖进来的视频是用户自己的文件，提示「尽快下载」纯属噪音。
+    const isGeneratedVideo = hasVideoContent && Boolean(data.metadata?.model);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
     const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : data.type === CanvasNodeType.Text ? data.metadata?.texts?.length || 0 : 0;
@@ -429,6 +431,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                 </div>
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
+
+                {/* 生成的视频只存在浏览器本地（IndexedDB），上游链接过期、清缓存或换设备都会丢，
+                    所以提醒尽早下载。挂在外框的下沿而不是内容里：内容容器是 overflow-hidden，
+                    绝对定位会被裁掉；挂外框则跟着节点一起移动缩放。展开提示词面板时让位。 */}
+                {isGeneratedVideo && !showPanel ? <VideoExpiryHint /> : null}
 
                 {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
@@ -1001,6 +1008,19 @@ function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span> : <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />}
             {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
+        </div>
+    );
+}
+
+/**
+ * 视频节点的有效期提示。样式对齐图片节点的尺寸条（半透明黑底、11px），
+ * 挂在节点下沿正中，不接收指针事件，免得挡住框选和拖动。
+ */
+function VideoExpiryHint() {
+    const { t } = useTranslation();
+    return (
+        <div className="pointer-events-none absolute inset-x-0 top-full z-30 flex justify-center pt-2">
+            <span className="whitespace-nowrap rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-medium leading-none text-white backdrop-blur-sm">{t("canvas.node.videoExpiryHint")}</span>
         </div>
     );
 }
