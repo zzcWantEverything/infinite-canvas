@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { changeAppLocale, type AppLocale } from "@/i18n";
+import { formatQuotaYuan } from "@/lib/quota";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 
@@ -18,6 +19,7 @@ export function UserMenuButton() {
     const { message } = App.useApp();
     const session = useUserStore((state) => state.session);
     const clearSession = useUserStore((state) => state.clearSession);
+    const refreshUser = useUserStore((state) => state.refreshUser);
     const theme = useThemeStore((state) => state.theme);
     const setTheme = useThemeStore((state) => state.setTheme);
 
@@ -35,6 +37,12 @@ export function UserMenuButton() {
         navigate("/auth");
     };
 
+    // 生成任务会实时扣额度，而 session 里的 user 是登录/启动时拉的快照，
+    // 展开菜单时补拉一次，免得菜单里的余额和钱包页对不上。
+    const handleMenuOpenChange = (open: boolean) => {
+        if (open) void refreshUser().catch(() => undefined);
+    };
+
     const menuIcon = (icon: ReactNode) => <span className="flex size-4 items-center justify-center text-stone-500 dark:text-stone-400">{icon}</span>;
 
     const userMenuItems = [
@@ -43,7 +51,7 @@ export function UserMenuButton() {
             label: (
                 <div className="px-1 py-2">
                     <div className="text-sm font-semibold text-stone-900 dark:text-stone-100">{displayName}</div>
-                    <div className="mt-0.5 text-xs text-stone-400 dark:text-stone-500">余额 {Math.floor((user.quota ?? 0) / 500000)} 元</div>
+                    <div className="mt-0.5 text-xs text-stone-400 dark:text-stone-500">余额 {formatQuotaYuan(user.quota)}</div>
                 </div>
             ),
             disabled: true,
@@ -85,7 +93,7 @@ export function UserMenuButton() {
     ];
 
     return (
-        <Dropdown menu={{ items: userMenuItems }} trigger={["click"]} placement="bottomRight">
+        <Dropdown menu={{ items: userMenuItems }} trigger={["click"]} placement="bottomRight" onOpenChange={handleMenuOpenChange}>
             <button type="button" className="ml-1 flex cursor-pointer items-center gap-2 rounded-full outline-none transition hover:opacity-80" aria-label="用户菜单">
                 <Avatar size={30} className="shrink-0 bg-stone-700 text-white dark:bg-stone-500" icon={<User className="size-4" />}>
                     {avatarLetter}

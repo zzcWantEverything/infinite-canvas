@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { App, Button, Input, Tooltip } from "antd";
 import { Activity, Copy, BarChart3, ExternalLink, WalletCards } from "lucide-react";
 
-import { fetchCurrentUser, fetchAffCode, redeemCode, type NewApiUser } from "@/services/api/auth";
+import { fetchAffCode, redeemCode } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
+import { formatQuotaYuan } from "@/lib/quota";
 import { useUserStore } from "@/stores/use-user-store";
 import { useCopyText } from "@/hooks/use-copy-text";
 
@@ -13,15 +14,13 @@ const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/
 /** 推荐计划暂时下线，需要恢复时把这里改回 true 即可（同时恢复下方推荐链接的拉取）。 */
 const SHOW_AFFILIATE_PROGRAM = false;
 
-function formatQuota(quota: number) {
-    return `¥${(quota / 500000).toFixed(2)}`;
-}
-
 export default function ProfilePage() {
     const { message } = App.useApp();
     const session = useUserStore((state) => state.session);
-    const [user, setUser] = useState<NewApiUser | null>(session?.user ?? null);
-    const [loading, setLoading] = useState(false);
+    const refreshUser = useUserStore((state) => state.refreshUser);
+    // 金额直接读 store 里的用户，不再自己存一份：钱包页刷新出来的余额要同步到顶栏菜单，
+    // 各存一份就会出现「这里 69.34、那里 49 元」。
+    const user = session?.user ?? null;
     const [redeemInput, setRedeemInput] = useState("");
     const [redeeming, setRedeeming] = useState(false);
     const [affCode, setAffCode] = useState("");
@@ -31,14 +30,12 @@ export default function ProfilePage() {
 
     const fetchUser = useCallback(async () => {
         if (!token) return;
-        setLoading(true);
         try {
-            const u = await fetchCurrentUser(FIXED_BASE_URL, token);
-            setUser(u);
-        } finally {
-            setLoading(false);
+            await refreshUser();
+        } catch {
+            // 401 由 http 层统一处理；网络异常时保留上一次的金额，不清空页面。
         }
-    }, [token]);
+    }, [token, refreshUser]);
 
     useEffect(() => {
         void fetchUser();
@@ -57,7 +54,7 @@ export default function ProfilePage() {
         setRedeeming(true);
         try {
             const added = await redeemCode(FIXED_BASE_URL, token, redeemInput.trim());
-            void message.success(`兑换成功，增加余额 ${formatQuota(added)}`);
+            void message.success(`兑换成功，增加余额 ${formatQuotaYuan(added)}`);
             setRedeemInput("");
             void fetchUser();
         } catch (err) {
@@ -77,8 +74,8 @@ export default function ProfilePage() {
             {/* 余额统计 */}
             <div className="grid grid-cols-3 divide-x divide-stone-200 rounded-xl border border-stone-200 bg-white dark:divide-stone-700 dark:border-stone-700 dark:bg-stone-900">
                 {[
-                    { label: "当前余额", value: formatQuota(user?.quota ?? 0), sub: "剩余配额", icon: <WalletCards className="size-4 text-emerald-500" /> },
-                    { label: "总用量", value: formatQuota(user?.used_quota ?? 0), sub: "总消耗额度", icon: <BarChart3 className="size-4 text-blue-500" /> },
+                    { label: "当前余额", value: formatQuotaYuan(user?.quota ?? 0), sub: "剩余配额", icon: <WalletCards className="size-4 text-emerald-500" /> },
+                    { label: "总用量", value: formatQuotaYuan(user?.used_quota ?? 0), sub: "总消耗额度", icon: <BarChart3 className="size-4 text-blue-500" /> },
                     { label: "API 请求", value: (user?.request_count ?? 0).toLocaleString(), sub: "总请求数", icon: <Activity className="size-4 text-violet-500" /> },
                 ].map((item) => (
                     <div key={item.label} className="flex flex-col gap-1 px-4 py-4">
@@ -131,8 +128,8 @@ export default function ProfilePage() {
 
                     <div className="grid grid-cols-3 gap-3 mb-4">
                         {[
-                            { label: "待确认", value: formatQuota(user?.aff_quota ?? 0) },
-                            { label: "总收入", value: formatQuota(user?.aff_history_quota ?? 0) },
+                            { label: "待确认", value: formatQuotaYuan(user?.aff_quota ?? 0) },
+                            { label: "总收入", value: formatQuotaYuan(user?.aff_history_quota ?? 0) },
                             { label: "邀请", value: `${user?.aff_count ?? 0} 人` },
                         ].map((item) => (
                             <div key={item.label} className="rounded-lg bg-stone-50 px-3 py-2 text-center dark:bg-stone-800">
