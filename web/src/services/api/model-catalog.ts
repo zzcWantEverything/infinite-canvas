@@ -128,10 +128,10 @@ async function requestCatalog(baseUrl: string, token: string) {
  * 拉取并缓存模型目录。同一个账号只发一轮请求；失败的 Promise 会吞掉错误，
  * 调用方不需要 catch，下次挂载会重试。
  */
-export function fetchModelCatalog(baseUrl: string, token: string): Promise<CatalogVariant[]> {
+export function fetchModelCatalog(baseUrl: string, token: string, options?: { force?: boolean }): Promise<CatalogVariant[]> {
     const scope = `${(baseUrl || "").trim()}|${(token || "").trim()}`;
     if (!token) return Promise.resolve(variantIndex ? Array.from(variantIndex.values()) : []);
-    if (variantIndex && scope === cachedScope && Date.now() - cachedAt < CACHE_TTL) {
+    if (!options?.force && variantIndex && scope === cachedScope && Date.now() - cachedAt < CACHE_TTL) {
         return Promise.resolve(Array.from(variantIndex.values()));
     }
     if (inflight) return inflight;

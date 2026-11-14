@@ -10,7 +10,10 @@ import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
 import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
+import { fetchPricingSnapshot, type PricingModelEntry, type PricingSnapshot } from "@/services/api/pricing";
 import { groupModelOptions } from "@/lib/model-picker-groups";
+import { estimateModelPrice } from "@/lib/model-price";
+import { videoModelCapability } from "@/config/video-models";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -71,6 +74,47 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         [options, catalogVersion],
     );
 
+    // 价格快照与视频面板同源（/api/pricing 计费表达式 × 分组倍率），下拉里报的价位
+    // 必须和面板算出来的一致，否则用户会以为哪边算错了。
+    const [pricing, setPricing] = useState<PricingSnapshot | null>(null);
+    useEffect(() => {
+        if (!session?.baseUrl) return;
+        let alive = true;
+        fetchPricingSnapshot(session.baseUrl)
+            .then((snapshot) => {
+                if (alive) setPricing(snapshot);
+            })
+            .catch(reportApiError);
+        return () => {
+            alive = false;
+        };
+    }, [session?.baseUrl]);
+
+    // 条目副标题（参考素材上限）+ 右侧价位。只写模型真正声明过的东西：目录里没写的字段
+    // 当「没声明」跳过，不编成「不支持」，否则会把能传视频的模型标成不能传。
+    const optionSummaries = useMemo(() => {
+        const summaries = new Map<string, { detail: string; price: string }>();
+        const unsupported = t("settingsPanels.model.detailUnsupported");
+        for (const option of options) {
+            const name = modelOptionName(option);
+            const limits = declaredReferenceLimits(name);
+            const parts: string[] = [];
+            const push = (count: number | null, key: string) => {
+                if (count === null) return;
+                parts.push(count > 0 ? t(key, { n: count }) : unsupported);
+            };
+            push(limits.images, "settingsPanels.model.detailImages");
+            push(limits.videos, "settingsPanels.model.detailVideos");
+            push(limits.audios, "settingsPanels.model.detailAudios");
+            // 价格算不出来（表达式引用了这里不知道的用量）时留空，不猜。
+            const entry = pricing?.models.get(name);
+            const estimate = pricing && entry ? estimateOptionPrice(entry, name, pricing.ratio) : null;
+            const price = estimate ? t(estimate.unit === "call" ? "settingsPanels.model.pricePerCall" : "settingsPanels.model.pricePerSecond", { price: formatMoney(estimate.value) }) : "";
+            if (parts.length || price) summaries.set(option, { detail: parts.join(" · "), price });
+        }
+        return summaries;
+    }, [options, pricing, catalogVersion, t]);
+
     // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
     const current = useMemo(() => {
         const raw = value || "";
@@ -126,7 +170,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             </SelectTrigger>
             <SelectContent
                 data-canvas-no-zoom
-                className="z-[1200] w-80 max-w-[calc(100vw-24px)] rounded-xl border border-border/70 bg-popover p-1 shadow-xl"
+                className="z-[1200] w-[26rem] max-w-[calc(100vw-24px)] rounded-xl border border-border/70 bg-popover p-1 shadow-xl"
                 position="popper"
                 align="start"
                 side="bottom"
@@ -138,20 +182,24 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     optionGroups.map((group) => {
                         if (!group.header) {
                             const only = group.items[0];
+                            const summary = optionSummaries.get(only.value);
                             return (
                                 <SelectItem key={only.value} value={only.value} textValue={modelOptionLabel(config, only.value)}>
-                                    <ModelLabel config={config} model={only.value} />
+                                    <ModelLabel config={config} model={only.value} detail={summary?.detail} price={summary?.price} />
                                 </SelectItem>
                             );
                         }
                         return (
                             <SelectGroup key={group.key}>
                                 <SelectLabel>{group.label}</SelectLabel>
-                                {group.items.map((item) => (
-                                    <SelectItem key={item.value} value={item.value} textValue={modelOptionLabel(config, item.value)}>
-                                        <ModelLabel config={config} model={item.value} label={item.label} />
-                                    </SelectItem>
-                                ))}
+                                {group.items.map((item) => {
+                                    const summary = optionSummaries.get(item.value);
+                                    return (
+                                        <SelectItem key={item.value} value={item.value} textValue={modelOptionLabel(config, item.value)}>
+                                            <ModelLabel config={config} model={item.value} label={item.label} detail={summary?.detail} price={summary?.price} />
+                                        </SelectItem>
+                                    );
+                                })}
                             </SelectGroup>
                         );
                     })
@@ -171,11 +219,64 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
     return config.models.length ? i18n.t("settingsPanels.model.noMatch", { capability: label }) : i18n.t("settingsPanels.model.addFirst");
 }
 
-function ModelLabel({ config, model, label }: { config: AiConfig; model: string; label?: string }) {
+/**
+ * 参考素材上限。优先读目录里的原始声明（`catalogVariant` 的 fields），目录没拉到才用内置
+ * 能力表兜底——内置表三个字段都写死了，0 就是真的不支持；目录里缺字段只是没声明。
+ */
+function declaredReferenceLimits(modelName: string) {
+    const fields = catalogVariant(modelName)?.capabilities?.fields;
+    if (fields) {
+        const read = (key: "max_images" | "max_videos" | "max_audios") => {
+            const max = fields[key]?.max;
+            return typeof max === "number" ? max : null;
+        };
+        return { images: read("max_images"), videos: read("max_videos"), audios: read("max_audios") };
+    }
+    const builtin = videoModelCapability(modelName);
+    return builtin ? { images: builtin.maxImages, videos: builtin.maxVideos, audios: builtin.maxAudios } : { images: null, videos: null, audios: null };
+}
+
+/** 估值用的分辨率档位：模型声明的最低档 → 计费 schema 的第一个枚举值 → 720 兜底。 */
+function optionResolution(modelName: string, entry: PricingModelEntry) {
+    const capability = videoModelCapability(modelName);
+    if (capability?.resolutions.length) return capability.resolutions[0];
+    const values = entry.usageSchema?.resolution?.enum;
+    if (Array.isArray(values) && values.length) return values[0].replace(/p$/i, "");
+    return "720";
+}
+
+/**
+ * 下拉里的价位。先看是不是按次计价的模型；再看表达式跟时长有没有关系——同样的分辨率下
+ * 1 秒和 2 秒一个价，说明这条表达式是一口价（`tier("base", 5.5)` 这种），得按「/次」报，
+ * 说成每秒会把用户吓跑；价随时长涨的才按「/秒」报。分辨率越高通常越贵，所以文案带「约」。
+ */
+function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio: number): { unit: "call" | "second"; value: number } | null {
+    if (entry.modelPrice > 0) return { unit: "call", value: entry.modelPrice * ratio };
+    const resolution = optionResolution(modelName, entry);
+    const oneSecond = estimateModelPrice(entry, { seconds: 1, resolution });
+    if (oneSecond === null || !Number.isFinite(oneSecond) || oneSecond <= 0) return null;
+    const twoSeconds = estimateModelPrice(entry, { seconds: 2, resolution });
+    const byDuration = twoSeconds !== null && twoSeconds > oneSecond;
+    return { unit: byDuration ? "second" : "call", value: oneSecond * ratio };
+}
+
+/** 0.045 → "0.045"，0.42 → "0.42"，42.9 → "42.90"：金额最小单位是分，≥0.1 一律两位。 */
+function formatMoney(value: number) {
+    // 展示价都是「表达式 × 分组倍率(1.5)」，常落到 0.735 / 1.245 这种三位小数，
+    // 直接原样打印会出现「约 ¥1.245/秒」这种读不动的数字，这里统一收到分。
+    const rounded = Number(value.toFixed(2));
+    return rounded >= 0.1 ? rounded.toFixed(2) : String(Number(value.toFixed(3)));
+}
+
+function ModelLabel({ config, model, label, detail, price }: { config: AiConfig; model: string; label?: string; detail?: string; price?: string }) {
     return (
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex w-full min-w-0 items-center gap-2">
             <ModelIcon model={model} />
-            <span className="truncate">{label || modelOptionLabel(config, model)}</span>
+            <span className="min-w-0 flex-1">
+                <span className="block truncate">{label || modelOptionLabel(config, model)}</span>
+                {detail ? <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{detail}</span> : null}
+            </span>
+            {price ? <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">{price}</span> : null}
         </span>
     );
 }

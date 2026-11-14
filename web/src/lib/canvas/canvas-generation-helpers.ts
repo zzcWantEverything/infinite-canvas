@@ -1,4 +1,5 @@
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
+import { clampSecondsToModel } from "@/config/video-models";
 import i18n from "@/i18n";
 import { ensureImagePreview, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
@@ -103,14 +104,17 @@ export function getInputSummary(inputs: NodeGenerationInput[]) {
 }
 
 export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
+    const model = resolveModelForCapability(config, node?.metadata?.model, mode);
+    const rawSeconds = node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds;
     return {
         ...config,
-        model: resolveModelForCapability(config, node?.metadata?.model, mode),
+        model,
         reasoningEffort: node?.metadata?.reasoningEffort || config.reasoningEffort || defaultConfig.reasoningEffort,
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
         size: node?.metadata?.size || config.size || defaultConfig.size,
         background: node?.metadata?.background ?? config.background ?? defaultConfig.background,
-        videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,
+        // 节点上存的秒数可能是换模型之前留下的，按当前模型能力收一次再提交。
+        videoSeconds: mode === "video" ? clampSecondsToModel(model, rawSeconds) : rawSeconds,
         vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,

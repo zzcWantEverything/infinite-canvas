@@ -3,6 +3,7 @@ import { BookOpen, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, 
 import { Dropdown, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
+import { SupportContactButton } from "@/components/layout/support-contact-button";
 import { UserMenuButton } from "@/components/layout/user-menu-button";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -142,6 +143,7 @@ export function CanvasTopBar({
 
                 <div className="pointer-events-auto flex items-center gap-1.5">
                     <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} />
+                    <SupportContactButton variant="canvas" />
                     <UserMenuButton />
                 </div>
             </div>

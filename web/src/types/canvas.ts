@@ -87,6 +87,11 @@ export type CanvasNodeMetadata = {
     videoTaskProvider?: "openai" | "gemini" | "ark" | "qora";
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
+    /**
+     * 复制/粘贴出来的节点记下来源节点 id。这类副本点了「生成」时结果覆盖它自己，
+     * 而不是再往下游派生一个新节点 —— 副本带着原节点的内容，用户改的是这个副本。
+     */
+    copiedFrom?: string;
 };
 
 export type CanvasNodeData = {

@@ -5,11 +5,13 @@ import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { sha256Hex } from "@/lib/hash";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution } from "@/lib/media-size";
-import { estimateVideoPrice, videoModelCapability, type VideoModelCapability } from "@/config/video-models";
+import { estimateVideoPrice, clampSecondsToModel, videoModelCapability, type VideoModelCapability } from "@/config/video-models";
+import { fetchModelCatalog } from "@/services/api/model-catalog";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { readApiErrorMessage, readAxiosError } from "./http";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { useUserStore } from "@/stores/use-user-store";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -94,9 +96,25 @@ function videoTaskFailed(message: string) {
     return error;
 }
 
+/**
+ * 提交前把时长收进当前档位的范围。
+ *
+ * 目录只在登录时预热一次，后台改过档位能力（比如「近期上新」从 5~30 秒收窄到 4~15 秒）
+ * 页面手里的还是旧快照；节点里也可能存着换档位之前的秒数。这里强制刷一次目录再裁，
+ * 否则会把旧范围里的秒数发给上游，直接 400「时长不可用」。
+ */
+async function prepareVideoSeconds(config: AiConfig): Promise<AiConfig> {
+    const { session } = useUserStore.getState();
+    if (session?.token) await fetchModelCatalog(session.baseUrl, session.token, { force: true });
+    const model = modelOptionName(config.videoModel || config.model);
+    const seconds = clampSecondsToModel(model, config.videoSeconds);
+    return seconds === config.videoSeconds ? config : { ...config, videoSeconds: seconds };
+}
+
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
-    const selectedModel = (config.model || config.videoModel).trim();
-    const requestConfig = resolveModelRequestConfig(config, selectedModel);
+    const readyConfig = await prepareVideoSeconds(config);
+    const selectedModel = (readyConfig.model || readyConfig.videoModel).trim();
+    const requestConfig = resolveModelRequestConfig(readyConfig, selectedModel);
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);

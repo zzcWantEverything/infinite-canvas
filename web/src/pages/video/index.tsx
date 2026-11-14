@@ -7,10 +7,13 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { ContentSafetyBlockedTips, ContentSafetyHint, ContentSafetyRulesDialog } from "@/components/content-safety-notice";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoModeLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isContentSafetyBlock } from "@/lib/content-safety";
+import { clampSecondsToModel } from "@/config/video-models";
 import { clampVideoSeconds } from "@/lib/media-size";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { deleteStoredMedia, resolveMediaUrl } from "@/services/file-storage";
@@ -168,6 +171,13 @@ export default function VideoPage() {
             message.error(t("videoWorkbench.clipboardEmpty"));
         }
     };
+    // 审核拦截不是系统故障：用轻提示告诉用户改什么，比甩一句红色报错有用，
+    // 而且反复点「重试」对审核拦截是无效的。
+    const notifyFailure = (errorMessage: string) => {
+        if (isContentSafetyBlock(errorMessage)) message.warning(t("contentSafety.blockedToast"));
+        else message.error(errorMessage);
+    };
+
     const generate = async () => {
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
@@ -193,7 +203,7 @@ export default function VideoPage() {
             setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
             await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, durationMs: performance.now() - batchStartedAt, status: "failed", error: errorMessage }));
-            message.error(errorMessage);
+            notifyFailure(errorMessage);
             setRunning(false);
         }
     };
@@ -350,7 +360,7 @@ export default function VideoPage() {
             setResults([{ id: log.id, status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
             await saveLog({ ...log, status: "failed", durationMs: Date.now() - log.createdAt, error: errorMessage });
-            message.error(errorMessage);
+            notifyFailure(errorMessage);
         } finally {
             activeLogIdsRef.current.delete(log.id);
             if (!activeLogIdsRef.current.size) {
@@ -410,6 +420,7 @@ export default function VideoPage() {
                                     </div>
                                 </div>
                                 <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("videoWorkbench.promptPlaceholder")} />
+                                <ContentSafetyHint className="mt-2" />
                             </div>
 
                             <div className="min-w-0">
@@ -450,7 +461,7 @@ export default function VideoPage() {
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s · {videoModeLabel(effectiveConfig.videoMode)}
+                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds, model)}s · {videoModeLabel(effectiveConfig.videoMode)}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     {t("workbench.adjust")}
@@ -523,7 +534,20 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
         <>
             <label className="col-span-2 block min-w-0 sm:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <ModelPicker
+                    config={config}
+                    value={model}
+                    onChange={(value) => {
+                        updateConfig("videoModel", value);
+                        // 切档位时把时长一并收进新模型的范围：面板显示的是裁过的值，
+                        // 配置里若还留着旧值，提交时就会超范围。
+                        const nextSeconds = clampSecondsToModel(value, config.videoSeconds);
+                        if (nextSeconds && nextSeconds !== config.videoSeconds) updateConfig("videoSeconds", nextSeconds);
+                    }}
+                    capability="video"
+                    fullWidth
+                    onMissingConfig={() => openConfigDialog(false)}
+                />
             </label>
             <div className="col-span-2">
                 <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
@@ -572,6 +596,31 @@ function PendingVideoCard() {
 
 function FailedVideoCard({ error, onRetry }: { error: string; onRetry: () => void }) {
     const { t } = useTranslation();
+    const [rulesOpen, setRulesOpen] = useState(false);
+    // 审核拦截和普通失败要分开：前者重试没有意义，得告诉用户改提示词或换素材。
+    const blocked = isContentSafetyBlock(error);
+    if (blocked) {
+        return (
+            <div className="overflow-hidden rounded-lg border border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20">
+                <div className="flex aspect-video flex-col items-center justify-center gap-2 p-5 text-center">
+                    <div className="text-sm font-medium text-amber-700 dark:text-amber-300">{t("contentSafety.blockedTitle")}</div>
+                    <Typography.Paragraph ellipsis={{ rows: 3 }} className="!mb-0 !text-xs !text-amber-600 dark:!text-amber-200/80">
+                        {error}
+                    </Typography.Paragraph>
+                    <ContentSafetyBlockedTips className="text-amber-700/80 dark:text-amber-200/70" />
+                </div>
+                <div className="flex justify-end gap-2 border-t border-amber-300 p-3 dark:border-amber-900">
+                    <Button size="small" onClick={() => setRulesOpen(true)}>
+                        {t("contentSafety.viewRules")}
+                    </Button>
+                    <Button size="small" onClick={onRetry}>
+                        {t("workbench.retry")}
+                    </Button>
+                </div>
+                <ContentSafetyRulesDialog open={rulesOpen} onOpenChange={setRulesOpen} />
+            </div>
+        );
+    }
     return (
         <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
             <div className="flex aspect-video flex-col items-center justify-center gap-3 p-5 text-center">
@@ -782,7 +831,7 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         model,
         videoModel: model,
         size: normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
+        videoSeconds: normalizeVideoSeconds(config.videoSeconds, model),
         vquality: normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
@@ -790,9 +839,11 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
     };
 }
 
-function normalizeVideoSeconds(value: string) {
+function normalizeVideoSeconds(value: string, model: string) {
     if (String(value).trim() === "-1") return "-1";
-    return clampVideoSeconds(value);
+    // 先按当前模型的能力裁，再走全局兜底：模型范围更窄时以模型为准，
+    // 否则换档位后会把上一个档位的秒数原样发给上游，直接 400。
+    return clampVideoSeconds(clampSecondsToModel(model, value));
 }
 
 function normalizeVideoSize(value: string) {

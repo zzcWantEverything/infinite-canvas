@@ -141,6 +141,27 @@ export function videoModelCapability(model: string): VideoModelCapability | null
 }
 
 
+/**
+ * 把时长裁到当前模型真正支持的范围。
+ *
+ * 面板显示时本来就会按能力 clamp，但配置里存的仍是上一个档位的原值；提交时不裁，
+ * 就会把 30 秒发给只支持 4~15 秒的档位，上游直接 400「时长不可用」。
+ */
+export function clampSecondsToModel(model: string, value: string): string {
+    const raw = String(value ?? "").trim();
+    // -1 是「自动时长」，交给上游决定，不要裁成具体秒数。
+    if (raw === "" || raw === "-1") return raw;
+    const seconds = Number(raw);
+    if (!Number.isFinite(seconds)) return raw;
+    const capability = videoModelCapability(model);
+    if (!capability) return raw;
+    const { min, max, step } = capability.seconds;
+    const stride = step && step > 0 ? step : 1;
+    const bounded = Math.min(max, Math.max(min, Math.round(seconds)));
+    const snapped = min + Math.round((bounded - min) / stride) * stride;
+    return String(Math.min(max, Math.max(min, snapped)));
+}
+
 export function videoModelPrice(capability: VideoModelCapability, resolution: string, hasReferenceVideo: boolean): VideoModelPrice {
     const entry = capability.price[resolution] || capability.price.default;
     if (!entry) return { kind: "per_call", price: 0 };

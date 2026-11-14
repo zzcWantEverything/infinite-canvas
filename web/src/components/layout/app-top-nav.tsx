@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
+import { SupportContactButton } from "@/components/layout/support-contact-button";
 import { UserMenuButton } from "@/components/layout/user-menu-button";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
@@ -75,6 +76,7 @@ export function AppTopNav() {
 
                         <div className="my-auto flex h-9 min-w-0 items-center justify-end gap-2 justify-self-end whitespace-nowrap">
                             <UserStatusActions />
+                            <SupportContactButton />
                             <UserMenuButton />
                         </div>
                     </div>

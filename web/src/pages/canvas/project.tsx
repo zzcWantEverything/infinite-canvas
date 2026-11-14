@@ -70,6 +70,7 @@ import {
     sourceNodeReferenceImages,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
+import { isContentSafetyBlock } from "@/lib/content-safety";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-manager-modal";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
@@ -176,6 +177,15 @@ function applyGeneratedVideo(item: CanvasNodeData, video: UploadedFile, extra: C
         position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
         metadata: { ...item.metadata, ...videoMetadata(video), ...extra },
     };
+}
+
+/**
+ * 生成失败的统一提示。审核拦截不是系统故障：重试改变不了结果，所以用轻提示
+ * 告诉用户改提示词或换素材，而不是甩一条红色报错让他再点一次。
+ */
+function notifyGenerationFailure(notice: { error: (content: string) => void; warning: (content: string) => void }, errorDetails: string, blockedText: string) {
+    if (isContentSafetyBlock(errorDetails)) notice.warning(blockedText);
+    else notice.error(errorDetails);
 }
 
 export default function CanvasPage() {
@@ -393,7 +403,7 @@ function InfiniteCanvasPage() {
                 if (isGenerationCanceled(error)) return;
                 const pending = isVideoTaskPending(error);
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                if (!pending) message.error(errorDetails);
+                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -459,7 +469,7 @@ function InfiniteCanvasPage() {
                 }
                 if (state.status === "failed") {
                     const errorDetails = state.error || t("canvas.projectPage.generationFailed");
-                    message.error(errorDetails);
+                    notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, videoTaskId: undefined } } : item)));
                     return;
                 }
@@ -1082,8 +1092,9 @@ function InfiniteCanvasPage() {
             id,
             title: `${source.title} Copy`,
             position: { x: source.position.x + 36, y: source.position.y + 36 },
-            // metadata 要与原节点分开，否则改副本配置会连带改到原件
-            metadata: source.metadata ? { ...source.metadata } : undefined,
+            // metadata 要与原节点分开，否则改副本配置会连带改到原件；
+            // copiedFrom 让副本在重新生成时把结果覆盖到自己身上（见 handleGenerateNode 的视频分支）。
+            metadata: { ...(source.metadata || {}), copiedFrom: source.id },
         };
 
         setNodes((prev) => [...prev, next]);
@@ -1141,7 +1152,8 @@ function InfiniteCanvasPage() {
                     x: node.position.x + dx,
                     y: node.position.y + dy,
                 },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
+                // 粘贴出来的同样是副本：重新生成时覆盖自己，不再往下游派生节点。
+                metadata: { ...(node.metadata || {}), copiedFrom: node.id },
             };
         });
 
@@ -2130,7 +2142,7 @@ function InfiniteCanvasPage() {
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.maskFailed");
-                message.error(errorDetails);
+                notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
             } finally {
                 finishGenerationRequest(childId, controller);
@@ -2436,7 +2448,7 @@ function InfiniteCanvasPage() {
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {
                         const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                        message.error(errorDetails);
+                        notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
                     }
                 } finally {
@@ -2616,15 +2628,19 @@ function InfiniteCanvasPage() {
                 if (mode === "video") {
                     const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content;
-                    const videoId = isEmptyVideoNode ? nodeId : nanoid();
+                    // 复制/粘贴出来的视频节点自己带着上一段视频，用户在这上面点生成就是要替换它，
+                    // 所以结果写回自身；普通节点（含正常带着视频的节点）仍然往下游派生新节点。
+                    const isCopiedVideoNode = sourceNode?.type === CanvasNodeType.Video && Boolean(sourceNode.metadata?.copiedFrom);
+                    const writeBackToSelf = isEmptyVideoNode || isCopiedVideoNode;
+                    const videoId = writeBackToSelf ? nodeId : nanoid();
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const videoNode: CanvasNodeData = {
                         id: videoId,
                         type: CanvasNodeType.Video,
                         title: effectivePrompt.slice(0, 32) || "Generated Video",
-                        position: isEmptyVideoNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y },
-                        width: isEmptyVideoNode ? sourceNode.width : spec.width,
-                        height: isEmptyVideoNode ? sourceNode.height : spec.height,
+                        position: writeBackToSelf && sourceNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y },
+                        width: writeBackToSelf && sourceNode ? sourceNode.width : spec.width,
+                        height: writeBackToSelf && sourceNode ? sourceNode.height : spec.height,
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
@@ -2640,11 +2656,15 @@ function InfiniteCanvasPage() {
                     };
                     pendingChildIds = [videoId];
                     setNodes((prev) =>
-                        isEmptyVideoNode
-                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...videoNode } : node))
+                        writeBackToSelf
+                            ? prev.map((node) =>
+                                  // 覆盖自己：保留 groupId / copiedFrom 等节点级信息，只换掉生成参数与状态；
+                                  // 上一轮的任务号与报错必须清掉，否则会被当成"还能续查的旧任务"。
+                                  node.id === nodeId ? { ...node, ...videoNode, metadata: { ...node.metadata, ...videoNode.metadata, errorDetails: undefined, videoTaskId: undefined, videoTaskProvider: undefined } } : node,
+                              )
                             : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), videoNode],
                     );
-                    if (!isEmptyVideoNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
+                    if (!writeBackToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
                     const controller = startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
                         await completeVideoNodeTask(videoId, generationConfig, effectivePrompt, generationContext.referenceImages, controller.signal, {
@@ -2811,7 +2831,7 @@ function InfiniteCanvasPage() {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
                 const pending = isVideoTaskPending(error);
-                if (!pending) message.error(errorDetails);
+                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((node) =>
                         node.id === nodeId || pendingChildIds.includes(node.id)
@@ -2970,7 +2990,7 @@ function InfiniteCanvasPage() {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
                 const pending = isVideoTaskPending(error);
-                if (!pending) message.error(errorDetails);
+                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { ChevronRight, Clock3, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
@@ -748,16 +748,48 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
+/**
+ * 画布里的视频节点。
+ *
+ * 这里刻意不走 React 的声明式渲染：`<video>` 只要被挪动一次（换父节点、被删了重建），
+ * 浏览器就会把播放暂停并把进度留在原地 —— 表现出来就是「鼠标一移开视频就不动了」，
+ * 因为悬停、选中、画布重绘都会让节点整棵树重渲染。所以用 ref 手工托管这个元素：
+ * 只在 src 变化时更新属性，其余时间 React 完全不碰它，播放状态就不会被打断。
+ */
 function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    if (!node.metadata?.content)
+    const content = node.metadata?.content;
+    const hostRef = useRef<HTMLDivElement>(null);
+    const videoRef = useRef<HTMLVideoElement | null>(null);
+
+    useLayoutEffect(() => {
+        if (!content) return;
+        const host = hostRef.current;
+        if (!host) return;
+        let video = videoRef.current;
+        if (!video) {
+            video = document.createElement("video");
+            video.controls = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.className = "h-full w-full rounded-[18px] bg-black object-contain";
+            video.dataset.canvasVideo = node.id;
+            video.dataset.canvasNoZoom = "";
+            videoRef.current = video;
+        }
+        // 只在元素确实不在这个容器里时才插入；重复 appendChild 本身就会让浏览器暂停播放。
+        if (video.parentElement !== host) host.appendChild(video);
+        if (video.getAttribute("src") !== content) video.src = content;
+    }, [content, node.id]);
+
+    if (!content)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
+    return <div ref={hostRef} className="h-full w-full" />;
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
