@@ -4,6 +4,7 @@ import { Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { ContentSafetyHint } from "@/components/content-safety-notice";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -89,6 +90,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
             />
+            <ContentSafetyHint compact className="mt-1.5" style={{ color: theme.node.muted }} />
 
             <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
@@ -157,6 +159,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
                         placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
                     />
+                    <ContentSafetyHint className="mt-2" />
                 </div>
             </Modal>
         </div>

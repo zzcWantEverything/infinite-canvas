@@ -1,5 +1,5 @@
 import { ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Modal } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -10,22 +10,25 @@ const RULE_KEYS = ["rulePolitical", "ruleSexual", "ruleViolence", "ruleIllegal",
 /**
  * 生成前的一条常驻提示。占位符里只能写一句话，用户一动手打字就看不见了，
  * 所以真正承载「会被审核」这件事的是这一行，加一个能展开细则的入口。
+ *
+ * compact 给画布节点的浮动面板用：那块地方只有 400px 宽、下面是模型和参数按钮，
+ * 长句子会把面板撑高，所以换成短文案 +「规则」，颜色也跟随画布主题。
  */
-export function ContentSafetyHint({ className }: { className?: string }) {
+export function ContentSafetyHint({ className, compact = false, style }: { className?: string; compact?: boolean; style?: CSSProperties }) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
 
     return (
         <>
-            <div className={cn("flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs leading-5 text-stone-500 dark:text-stone-400", className)}>
-                <ShieldAlert className="size-3.5 shrink-0" />
-                <span>{t("contentSafety.hint")}</span>
+            <div className={cn("flex flex-wrap items-center gap-x-1.5 gap-y-1 leading-5 text-stone-500 dark:text-stone-400", compact ? "text-[11px]" : "text-xs", className)} style={style}>
+                <ShieldAlert className={cn("shrink-0", compact ? "size-3" : "size-3.5")} />
+                <span>{t(compact ? "contentSafety.hintCompact" : "contentSafety.hint")}</span>
                 <button
                     type="button"
-                    className="cursor-pointer border-none bg-transparent p-0 text-xs text-stone-600 underline decoration-stone-300 underline-offset-2 transition-colors hover:text-stone-900 dark:text-stone-300 dark:decoration-stone-600 dark:hover:text-stone-100"
+                    className="cursor-pointer border-none bg-transparent p-0 text-inherit underline underline-offset-2 transition-opacity hover:opacity-70"
                     onClick={() => setOpen(true)}
                 >
-                    {t("contentSafety.viewRules")}
+                    {t(compact ? "contentSafety.viewRulesShort" : "contentSafety.viewRules")}
                 </button>
             </div>
             <ContentSafetyRulesDialog open={open} onOpenChange={setOpen} />
