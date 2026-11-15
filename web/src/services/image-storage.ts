@@ -2,6 +2,7 @@ import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
+import { getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, uploadToCloud } from "@/services/canvas-cloud";
 import { withLocalProxy } from "@/stores/use-config-store";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
 
@@ -60,6 +61,7 @@ async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<Uploa
         throwIfAborted(options?.signal);
         objectUrls.set(storageKey, url);
         await storeImagePreview(storageKey, blob);
+        void syncImageToCloud(storageKey, blob, meta);
         return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type.startsWith("image/") ? blob.type : "" };
     } catch (error) {
         URL.revokeObjectURL(url);
@@ -142,13 +144,38 @@ function throwIfAborted(signal?: AbortSignal) {
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
+    // 云端对象键：换设备加载后 doc 里的 storageKey 直接就是 objectKey。
+    if (storageKey.startsWith("media/")) {
+        const urls = (await getCloudMediaUrls([storageKey]).catch(() => null)) ?? {};
+        return urls[storageKey] || fallback;
+    }
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
     const blob = await store.getItem<Blob>(storageKey);
-    if (!blob) return fallback;
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    return url;
+    if (blob) {
+        const url = URL.createObjectURL(blob);
+        objectUrls.set(storageKey, url);
+        return url;
+    }
+    // 本地没有 blob：换设备 / 清缓存后，靠 objectKey 换签名地址回放。
+    const objectKey = await objectKeyFor(storageKey);
+    if (objectKey) {
+        const urls = (await getCloudMediaUrls([objectKey]).catch(() => null)) ?? {};
+        const url = urls[objectKey];
+        if (url) return url;
+    }
+    return fallback;
+}
+
+// 上传成功后把 storageKey -> objectKey 的映射落盘，供跨设备回放。
+async function syncImageToCloud(storageKey: string, blob: Blob, meta: { width?: number; height?: number }) {
+    if (!isCloudEnabled()) return;
+    try {
+        const objectKey = await uploadToCloud(blob, "image", blob.type || "image/png", { width: meta.width, height: meta.height });
+        await recordObjectKey(storageKey, objectKey);
+    } catch {
+        // 失败静默，本地图片照常可用。
+    }
 }
 
 export async function getImageBlob(storageKey: string) {

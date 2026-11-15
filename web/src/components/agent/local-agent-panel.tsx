@@ -10,7 +10,7 @@ import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
-import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { nodeSizeByWidth } from "@/lib/canvas/canvas-node-size";
 import { resolveCanvasReferenceImages } from "@/lib/canvas/canvas-resource-references";
 import { readImageMeta } from "@/lib/image-utils";
 import { randomId } from "@/lib/utils";
@@ -1261,7 +1261,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 if (context) {
                     const right = Math.max(0, ...context.snapshot.nodes.map((node) => node.position.x + node.width)) + 80;
                     const ops = generated.map<CanvasAgentOp>((image, index) => {
-                        const size = fitNodeSize(image.upload.width, image.upload.height);
+                        const size = nodeSizeByWidth(image.upload.width, image.upload.height);
                         return {
                             type: "add_node",
                             id: `image-${createId()}`,
@@ -1531,7 +1531,7 @@ async function attachmentNodeOps(endpoint: string, token: string, clientId: stri
                 throw new Error(body?.error || rt("attachmentReadFailed"));
             }
             const image = await uploadImage(await res.blob());
-            const size = fitNodeSize(image.width, image.height);
+            const size = nodeSizeByWidth(image.width, image.height);
             const position = item.position && typeof item.position === "object" ? (item.position as { x?: unknown; y?: unknown }) : {};
             return {
                 type: "add_node" as const,

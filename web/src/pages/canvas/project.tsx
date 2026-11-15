@@ -11,6 +11,7 @@ import { createVideoGenerationTask, isVideoTaskFailed, isVideoTaskPending, pollV
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { pushProjectToCloud } from "@/services/canvas-cloud-sync";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -18,7 +19,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
+import { fitNodeSize, nodeSizeByWidth, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -155,9 +156,6 @@ type CanvasGenerationRequest = {
     runningNodeId: string;
     controller: AbortController;
 };
-
-const VIDEO_NODE_MAX_WIDTH = 420;
-const VIDEO_NODE_MAX_HEIGHT = 420;
 // Stable empty reference array prevents `... || []` from invalidating CanvasNode's React.memo on every render.
 const EMPTY_REFERENCES: CanvasResourceReference[] = [];
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
@@ -168,8 +166,53 @@ const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 const NODE_STATUS_PENDING = "pending" as const;
 
+/**
+ * 复制节点时把「生成中」的临时状态静态化：
+ * - images/texts 里只保留已经生成好的（success），去掉还在转圈的 loading/pending；
+ * - 节点 status 是 loading/pending 时，有结果归一成 success，没有就变 idle；
+ * - 清掉 videoTaskId 等生成中才用的字段，避免副本被当成还在跑的任务继续轮询。
+ */
+function staticizeNodeMetadata(metadata?: CanvasNodeData["metadata"]): CanvasNodeData["metadata"] {
+    if (!metadata) return metadata;
+    const next: CanvasNodeData["metadata"] = { ...metadata };
+
+    if (Array.isArray(next.images)) {
+        const images = next.images.filter((image) => image.status === NODE_STATUS_SUCCESS);
+        if (images.length > 0) {
+            next.images = images;
+            if (!images.some((image) => image.id === next.primaryImageId)) {
+                // 主图还在生成，切到第一张已经好的图，并同步 content / 尺寸。
+                next.primaryImageId = images[0].id;
+                next.content = images[0].content;
+                next.storageKey = images[0].storageKey;
+                next.naturalWidth = images[0].naturalWidth;
+                next.naturalHeight = images[0].naturalHeight;
+                next.bytes = images[0].bytes;
+                next.mimeType = images[0].mimeType;
+            }
+        } else {
+            // 全部都在生成中，副本退化成空节点，等用户重新生成。
+            delete next.images;
+            delete next.primaryImageId;
+            delete next.content;
+            delete next.storageKey;
+        }
+    }
+    if (Array.isArray(next.texts)) {
+        const texts = next.texts.filter((text) => text.status === NODE_STATUS_SUCCESS);
+        if (texts.length > 0) next.texts = texts;
+        else delete next.texts;
+    }
+    if (next.status === NODE_STATUS_LOADING || next.status === NODE_STATUS_PENDING) {
+        next.status = next.content ? NODE_STATUS_SUCCESS : NODE_STATUS_IDLE;
+    }
+    delete next.videoTaskId;
+    delete next.errorDetails;
+    return next;
+}
+
 function applyGeneratedVideo(item: CanvasNodeData, video: UploadedFile, extra: CanvasNodeData["metadata"] = {}): CanvasNodeData {
-    const videoSize = fitNodeSize(video.width || item.width, video.height || item.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+    const videoSize = nodeSizeByWidth(video.width || item.width, video.height || item.height);
     return {
         ...item,
         width: videoSize.width,
@@ -223,6 +266,7 @@ function InfiniteCanvasPage() {
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const cloudPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const applyingHistoryRef = useRef(false);
     const historyPausedRef = useRef(false);
     const didInitialCenterRef = useRef(false);
@@ -613,6 +657,13 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!projectLoaded || historyPausedRef.current) return;
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo });
+        // 云端保存防抖 1.5s：等用户停手再推，避免每个节点拖一下都打一次接口。
+        if (cloudPushTimerRef.current) clearTimeout(cloudPushTimerRef.current);
+        cloudPushTimerRef.current = setTimeout(() => {
+            cloudPushTimerRef.current = null;
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (project) void pushProjectToCloud(project);
+        }, 1500);
     }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
     useEffect(() => {
@@ -630,6 +681,18 @@ function InfiniteCanvasPage() {
             if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         };
     }, [projectId, projectLoaded, updateProject, viewport]);
+
+    // 离开画布时把尚未触发的云端保存补发一次，避免最后几笔编辑被防抖吞掉。
+    useEffect(() => {
+        return () => {
+            if (cloudPushTimerRef.current) {
+                clearTimeout(cloudPushTimerRef.current);
+                cloudPushTimerRef.current = null;
+                const project = useCanvasStore.getState().openProject(projectId);
+                if (project) void pushProjectToCloud(project);
+            }
+        };
+    }, [projectId]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -1094,7 +1157,7 @@ function InfiniteCanvasPage() {
             position: { x: source.position.x + 36, y: source.position.y + 36 },
             // metadata 要与原节点分开，否则改副本配置会连带改到原件；
             // copiedFrom 让副本在重新生成时把结果覆盖到自己身上（见 handleGenerateNode 的视频分支）。
-            metadata: { ...(source.metadata || {}), copiedFrom: source.id },
+            metadata: { ...(staticizeNodeMetadata(source.metadata) || {}), copiedFrom: source.id },
         };
 
         setNodes((prev) => [...prev, next]);
@@ -1113,7 +1176,7 @@ function InfiniteCanvasPage() {
             .map((node) => ({
                 ...node,
                 position: { ...node.position },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
+                metadata: staticizeNodeMetadata(node.metadata),
             }));
 
         if (!copiedNodes.length) return;
@@ -1573,7 +1636,7 @@ function InfiniteCanvasPage() {
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
         const image = await uploadImage(file);
-        const size = fitNodeSize(image.width, image.height);
+        const size = nodeSizeByWidth(image.width, image.height);
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const newNode: CanvasNodeData = {
             id,
@@ -1593,7 +1656,7 @@ function InfiniteCanvasPage() {
 
     const createVideoFileNode = useCallback(async (file: File, position: Position) => {
         const video = await uploadMediaFile(file, "video");
-        const size = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+        const size = nodeSizeByWidth(video.width || 1280, video.height || 720);
         const id = `video-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         setNodes((prev) => [
             ...prev,
@@ -1909,7 +1972,7 @@ function InfiniteCanvasPage() {
             if (node?.type !== CanvasNodeType.Video || !node.metadata?.content || !video) return message.error(t("canvas.videoFrames.failed"));
             try {
                 const image = await uploadImage(await captureVideoFrame(node.metadata.content, position, video.currentTime));
-                const size = fitNodeSize(image.width, image.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                const size = nodeSizeByWidth(image.width, image.height);
                 const id = nanoid();
                 const x = node.position.x + node.width + 96;
                 let y = node.position.y + node.height / 2 - size.height / 2;
@@ -2157,7 +2220,7 @@ function InfiniteCanvasPage() {
         setUpscaleNodeId(null);
         const upscaled = await upscaleDataUrl(node.metadata.content, params);
         const image = await uploadImage(upscaled);
-        const size = fitNodeSize(image.width, image.height);
+        const size = nodeSizeByWidth(image.width, image.height);
         const childId = nanoid();
         const child: CanvasNodeData = {
             id: childId,
@@ -2218,7 +2281,7 @@ function InfiniteCanvasPage() {
                     { signal: controller.signal },
                 ).then((items) => items[0]);
                 const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
-                const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                const size = nodeSizeByWidth(uploaded.width, uploaded.height);
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata } } : item)));
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
@@ -2288,7 +2351,7 @@ function InfiniteCanvasPage() {
                     setSelectedConnectionId(null);
                 } else if (first.type.startsWith("video/")) {
                     const video = await uploadMediaFile(first, "video");
-                    const nextSize = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                    const nextSize = nodeSizeByWidth(video.width || 1280, video.height || 720);
                     setNodes((prev) =>
                         prev.map((node) =>
                             node.id === target.nodeId
@@ -2308,7 +2371,7 @@ function InfiniteCanvasPage() {
                     setSelectedConnectionId(null);
                 } else {
                     const image = await uploadImage(first);
-                    const s = fitNodeSize(image.width, image.height);
+                    const s = nodeSizeByWidth(image.width, image.height);
                     setNodes((prev) =>
                         prev.map((node) =>
                             node.id === target.nodeId
@@ -2566,7 +2629,7 @@ function InfiniteCanvasPage() {
                                     ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
                                     : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
                                 const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
-                                const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                                const imageSize = nodeSizeByWidth(uploaded.width, uploaded.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
                                     prev.map((node) => {
@@ -2970,7 +3033,7 @@ function InfiniteCanvasPage() {
                         if (item.id !== node.id) return item;
                         const makePrimary = !imageId || !item.metadata?.content;
                         const edge = imageId ? Math.max(item.width, item.height) : 0;
-                        const imageSize = imageId && item.metadata?.freeResize ? { width: item.width, height: item.height } : imageId ? fitNodeSize(uploadedImage.width, uploadedImage.height, edge, edge) : fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
+                        const imageSize = imageId && item.metadata?.freeResize ? { width: item.width, height: item.height } : imageId ? fitNodeSize(uploadedImage.width, uploadedImage.height, edge, edge) : nodeSizeByWidth(uploadedImage.width, uploadedImage.height);
                         return {
                             ...item,
                             type: CanvasNodeType.Image,
@@ -3071,7 +3134,7 @@ function InfiniteCanvasPage() {
             const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadImage(image.dataUrl);
             await ensureImagePreview(storedImage.storageKey);
             const meta = storedImage.width === 1 && storedImage.height === 1 ? await readImageMeta(storedImage.url) : storedImage;
-            const config = fitNodeSize(meta.width, meta.height);
+            const config = nodeSizeByWidth(meta.width, meta.height);
             const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
             const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             const node: CanvasNodeData = {
@@ -3115,7 +3178,7 @@ function InfiniteCanvasPage() {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                 const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
                 const id = `video-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                const nextSize = fitNodeSize(payload.width || spec.width, payload.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                const nextSize = nodeSizeByWidth(payload.width || spec.width, payload.height || spec.height);
                 setNodes((prev) => [
                     ...prev,
                     {

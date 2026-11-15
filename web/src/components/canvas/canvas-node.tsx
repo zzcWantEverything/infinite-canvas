@@ -783,6 +783,9 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
             video.controls = true;
             video.loop = true;
             video.playsInline = true;
+            // 只取元数据展示首帧，不预加载整段视频：一个画布常挂十几个视频，
+            // 云端回放时若不限制，打开画布就会并发拉取全部视频流。
+            video.preload = "metadata";
             video.className = "h-full w-full rounded-[18px] bg-black object-contain";
             video.dataset.canvasVideo = node.id;
             video.dataset.canvasNoZoom = "";
@@ -800,7 +803,15 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
-    return <div ref={hostRef} className="h-full w-full" />;
+    return (
+        <div
+            ref={hostRef}
+            className="h-full w-full"
+            // 鼠标移出节点就停：一个画布常挂十几个视频，播着不管会同时响好几条声音，
+            // 也很难判断到底是哪个节点在放。用 pointer 系列是为了触摸/手写笔一起覆盖。
+            onPointerLeave={() => videoRef.current?.pause()}
+        />
+    );
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {

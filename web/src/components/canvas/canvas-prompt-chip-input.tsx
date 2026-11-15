@@ -300,8 +300,45 @@ function createReferenceChip(reference: CanvasResourceReference, theme: (typeof 
     return wrapper;
 }
 
+// Elements whose boundaries must survive serialization as hard line breaks, so that
+// pasted rich text ("<p>a</p><p>b</p>") keeps its paragraph structure instead of collapsing.
+const BLOCK_TAGS = new Set([
+    "ADDRESS",
+    "ARTICLE",
+    "BLOCKQUOTE",
+    "DD",
+    "DIV",
+    "DL",
+    "DT",
+    "FIGCAPTION",
+    "FOOTER",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "HEADER",
+    "HR",
+    "LI",
+    "OL",
+    "P",
+    "PRE",
+    "SECTION",
+    "TABLE",
+    "TR",
+    "UL",
+]);
+
+/** Appends a single line break unless {@link value} already ends with one. */
+function appendLineBreak(value: string) {
+    return value.endsWith("\n") ? value : `${value}\n`;
+}
+
 function serializeEditor(editor: HTMLElement) {
-    return serializeNodes(editor.childNodes).replace(/﻿/g, "");
+    return serializeNodes(editor.childNodes)
+        .replace(/﻿/g, "")
+        .replace(/\n+$/, "");
 }
 
 function serializeNodes(nodes: NodeListOf<ChildNode>) {
@@ -310,9 +347,15 @@ function serializeNodes(nodes: NodeListOf<ChildNode>) {
         if (node.nodeType === Node.TEXT_NODE) result += node.textContent || "";
         if (!(node instanceof HTMLElement)) return;
         const label = node.dataset.refLabel;
+        // Chips are atomic inline nodes: their placeholder text never introduces line breaks.
         if (label) result += label;
         else if (node.tagName === "BR") result += "\n";
-        else result += serializeNodes(node.childNodes);
+        else {
+            const inner = serializeNodes(node.childNodes);
+            result += inner;
+            // Empty blocks (for example "<p></p>") are swallowed so runs of them do not stack blank lines.
+            if (inner && BLOCK_TAGS.has(node.tagName)) result = appendLineBreak(result);
+        }
     });
     return result;
 }

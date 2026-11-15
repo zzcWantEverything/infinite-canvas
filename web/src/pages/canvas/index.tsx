@@ -5,6 +5,7 @@ import { Download, FileUp, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { readZip } from "@/lib/zip";
+import { pullCloudToLocal } from "@/services/canvas-cloud-sync";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
@@ -62,6 +63,12 @@ export default function CanvasPage() {
             if (inputRef.current) inputRef.current.value = "";
         }
     };
+
+    useEffect(() => {
+        if (!hydrated) return;
+        // 进入画布库时从云端拉一次，把其它设备保存的画布并进来。
+        void pullCloudToLocal();
+    }, [hydrated]);
 
     useEffect(() => {
         if (!hydrated || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;

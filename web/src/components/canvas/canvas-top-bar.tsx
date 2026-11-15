@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
+import { ArrowLeft, BookOpen, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
 import { Dropdown, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -78,6 +78,19 @@ export function CanvasTopBar({
         <>
             <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between pl-1 pr-4">
                 <div className="pointer-events-auto flex min-w-0 items-center gap-2">
+                    {/* 返回画布库做成一级按钮：它原来只藏在 ☰ 的下拉里，
+                        和「新建/删除/导入」混在一起，找起来全靠猜。 */}
+                    <Tooltip title={t("canvas.backToProjects")}>
+                        <button
+                            type="button"
+                            onClick={onProjects}
+                            aria-label={t("canvas.backToProjects")}
+                            className="group grid size-7 shrink-0 place-items-center rounded-full transition hover:bg-black/5 active:scale-95 dark:hover:bg-white/10"
+                            style={{ color: theme.node.text }}
+                        >
+                            <ArrowLeft className="size-4 transition-transform duration-150 group-hover:-translate-x-0.5" />
+                        </button>
+                    </Tooltip>
                     <Tooltip title={sidePanelOpen ? t("canvas.collapsePanel") : t("canvas.expandPanel")}>
                         <button
                             type="button"

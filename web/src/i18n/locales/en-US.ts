@@ -266,6 +266,7 @@ export default {
         home: "Home",
         docs: "Documentation",
         projects: "My Canvases",
+        backToProjects: "Back to canvases",
         deleteCurrent: "Delete current canvas",
         importAsset: "Import asset",
         exportCurrent: "Export current canvas",

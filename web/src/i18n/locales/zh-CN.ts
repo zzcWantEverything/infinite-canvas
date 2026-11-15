@@ -266,6 +266,7 @@ export default {
         home: "主页",
         docs: "文档",
         projects: "我的画布",
+        backToProjects: "返回画布库",
         deleteCurrent: "删除当前画布",
         importAsset: "导入资产",
         exportCurrent: "导出当前画布",
