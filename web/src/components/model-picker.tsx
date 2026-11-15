@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { encodeChannelModel, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { encodeChannelModel, guessCapability, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserVideoModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
@@ -51,7 +51,9 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
 
     // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
-    const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels : configOptions;
+    // 服务端 /api/user/models 会把手动加的 GPT 生图渠道（gpt-image-*）一起返回，视频节点只该
+    // 出现视频模型，所以先按目录的 modality.output 滤一遍；目录没写 output 的再用关键词兜底。
+    const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels.filter((model) => isVideoModel(modelOptionName(model))) : configOptions;
 
     // 网关目录把同一款模型的多条线路归到一张卡片（variant_group），运营也会直接在展示名里
     // 写分组（「高清视觉 · sd2.5 1080P」）。两种写法都按同一套规则折叠：前缀做组标题，
@@ -237,6 +239,21 @@ function declaredReferenceLimits(modelName: string) {
 }
 
 /** 估值用的分辨率档位：模型声明的最低档 → 计费 schema 的第一个枚举值 → 720 兜底。 */
+/**
+ * 视频节点是否该显示这个模型。目录（catalog）的 capabilities.modality.output 是权威：
+ * ["video"] 才是视频；目录里没这个模型（还没拉到）时先保留，等目录到了再精过滤；
+ * 目录有这个模型但没声明 output（如手动加的 GPT 生图渠道），退回关键词猜测。
+ */
+function isVideoModel(name: string): boolean {
+    const variant = catalogVariant(name);
+    if (!variant) return true;
+    const output = variant.capabilities?.modality?.output;
+    if (output && output.length) return output.includes("video");
+    const known = videoModelCapability(name);
+    if (known) return known.available !== false;
+    return guessCapability(name) === "video";
+}
+
 function optionResolution(modelName: string, entry: PricingModelEntry) {
     const capability = videoModelCapability(modelName);
     if (capability?.resolutions.length) return capability.resolutions[0];
