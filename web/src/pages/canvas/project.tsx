@@ -2476,7 +2476,10 @@ function InfiniteCanvasPage() {
         if ((event.target as HTMLElement).closest("[data-node-id]")) return;
         event.preventDefault();
         setContextMenu(null);
-    }, []);
+        // 右键空白画布 = 新建节点菜单；选择参考图时不要打断选图。
+        if (referencePickerNodeId) return;
+        setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
+    }, [referencePickerNodeId, screenToCanvas]);
 
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
@@ -3335,7 +3338,6 @@ function InfiniteCanvasPage() {
                     onCanvasDoubleClick={(event) => {
                         if (referencePickerNodeId) return;
                         setContextMenu(null);
-                        setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
                     }}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}
