@@ -1636,7 +1636,11 @@ function InfiniteCanvasPage() {
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
         const image = await uploadImage(file);
-        const size = nodeSizeByWidth(image.width, image.height);
+        // 拖入的图片固定成视频节点的比例（横图 16:9、竖图 9:16），尺寸和视频节点一致，
+        // 不再按图片原始宽高比浮动，避免画布里大图小图、横竖混杂参差不齐。
+        const landscape = (image.width || 0) >= (image.height || 0);
+        const videoSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
+        const size = nodeSizeFromRatio(landscape ? "16:9" : "9:16", videoSpec.width, videoSpec.height) || videoSpec;
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const newNode: CanvasNodeData = {
             id,
