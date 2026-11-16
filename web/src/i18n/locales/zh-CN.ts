@@ -75,6 +75,9 @@ export default {
         category: "分类",
         tags: "标签",
         search: "搜索标题、内容或标签",
+        sourceEmpty: "提示词来源还没加载出来，默认来源在 GitHub 上，网络不通时会一直是空的。",
+        retry: "重新加载",
+        loadingSources: "正在加载提示词来源，首次打开可能需要十几秒",
         searchTitle: "按标题查询",
         loadFailed: "获取提示词失败",
         sourceMissing: "提示词来源不存在",
@@ -402,6 +405,7 @@ export default {
         inspirationSubtitle: "从别人的好结果开始，看看他们用了什么提示词",
         viewAll: "查看全部",
         emptyInspiration: "还没有灵感作品",
+        emptyInspirationHint: "默认提示词来源在 GitHub 上，网络不通就会一直空着。可以稍后重试，或到配置里换一个能访问的来源。",
     },
     version: {
         viewUpdates: "查看版本更新",

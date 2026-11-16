@@ -34,6 +34,8 @@ export function AppTopNav() {
 
     const submitSearch = () => {
         const text = keyword.trim();
+        // 搜完就清空：提示词库页自己有搜索框，两个框同时显示同一个词很别扭。
+        setKeyword("");
         navigate(text ? `/prompts?q=${encodeURIComponent(text)}` : "/prompts");
     };
 

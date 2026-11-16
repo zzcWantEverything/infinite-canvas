@@ -83,8 +83,7 @@ export default function CanvasPage() {
             <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10">
                 <header className="flex flex-wrap items-end justify-between gap-4 border-b border-stone-200 pb-6 dark:border-stone-800">
                     <div>
-                        <p className="text-xs text-stone-500">{t("canvas.library")}</p>
-                        <h1 className="mt-3 text-3xl font-semibold">{t("canvas.title")}</h1>
+                        <h1 className="text-3xl font-semibold">{t("navigation.canvas")}</h1>
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
@@ -112,7 +111,7 @@ export default function CanvasPage() {
                 </header>
 
                 {!hydrated ? (
-                    <section className="flex min-h-[360px] items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</section>
+                    <section className="flex min-h-[360px] items-center justify-center text-sm text-stone-500">{t("canvas.loading")}</section>
                 ) : projects.length ? (
                     <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
                         {projects.map((project) => (
@@ -120,7 +119,7 @@ export default function CanvasPage() {
                         ))}
                     </div>
                 ) : (
-                    <section className="flex min-h-[360px] flex-col items-center justify-center border-y border-stone-200 text-center dark:border-stone-800">
+                    <section className="flex min-h-[360px] flex-col items-center justify-center text-center">
                         <h2 className="text-xl font-medium">{t("canvas.empty")}</h2>
                         <p className="mt-3 text-sm text-stone-500">{t("canvas.emptyDescription")}</p>
                         <Button type="primary" className="mt-6" icon={<Plus className="size-4" />} onClick={createAndEnter}>

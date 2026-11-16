@@ -24,10 +24,22 @@ export default function IndexPage() {
     const [previewOpen, setPreviewOpen] = useState(false);
 
     useEffect(() => {
+        let cancelled = false;
+        // 提示词源都在 GitHub 上，网络不通时可能要等很久；骨架最多显示 8 秒就退回空态，避免一直转圈。
+        const timer = window.setTimeout(() => setLoading(false), 8000);
         void fetchPrompts({ pageSize: 16 })
-            .then((data) => setShowcase(data.items))
+            .then((data) => {
+                if (!cancelled) setShowcase(data.items);
+            })
             .catch((error) => message.error(error instanceof Error ? error.message : i18n.t("home.promptError")))
-            .finally(() => setLoading(false));
+            .finally(() => {
+                window.clearTimeout(timer);
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
     }, [message]);
 
     const submit = () => {
@@ -92,19 +104,19 @@ export default function IndexPage() {
                                 </Button>
                             </div>
 
-                            <Button type="primary" size="large" shape="round" icon={<Sparkles className="size-4" />} onClick={submit} className="!px-6">
+                            <Button type="primary" size="large" shape="round" icon={<Sparkles className="size-4" />} onClick={submit} className="w-full !px-6 sm:w-auto">
                                 {t("home.generate")}
                             </Button>
                         </div>
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    <div className="hide-scrollbar -mx-5 mt-3 flex gap-2 overflow-x-auto px-5 pb-1 sm:mx-0 sm:flex-wrap sm:justify-center sm:overflow-visible sm:px-0">
                         {suggestions.map((text) => (
                             <button
                                 key={text}
                                 type="button"
                                 onClick={() => setPrompt(text)}
-                                className="rounded-full border border-stone-200/80 bg-background/70 px-3.5 py-1.5 text-xs leading-5 text-stone-600 transition hover:border-stone-300 hover:bg-background hover:text-stone-900 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-400 dark:hover:border-stone-700 dark:hover:text-stone-100"
+                                className="shrink-0 whitespace-nowrap rounded-full border border-stone-200/80 bg-background/70 px-3.5 py-1.5 text-xs leading-5 text-stone-600 transition hover:border-stone-300 hover:bg-background hover:text-stone-900 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-400 dark:hover:border-stone-700 dark:hover:text-stone-100"
                             >
                                 {text}
                             </button>
@@ -125,8 +137,8 @@ export default function IndexPage() {
 
                     {loading ? (
                         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-                            {[224, 288, 208, 256, 240, 208, 288, 224].map((height, index) => (
-                                <div key={index} className="animate-pulse rounded-2xl bg-stone-200/70 dark:bg-stone-800" style={{ height }} />
+                            {Array.from({ length: 8 }).map((_, index) => (
+                                <div key={index} className={cn("animate-pulse rounded-2xl bg-stone-200/70 dark:bg-stone-800", index % 3 === 0 ? "h-44" : "h-32")} />
                             ))}
                         </div>
                     ) : (
@@ -170,7 +182,15 @@ export default function IndexPage() {
                         </div>
                     )}
 
-                    {!loading && !showcase.length ? <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-stone-200 text-sm text-stone-400 dark:border-stone-800">{t("home.emptyInspiration")}</div> : null}
+                    {!loading && !showcase.length ? (
+                        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-stone-200 px-6 py-14 text-center dark:border-stone-800">
+                            <p className="text-sm font-medium text-stone-600 dark:text-stone-300">{t("home.emptyInspiration")}</p>
+                            <p className="max-w-md text-xs leading-5 text-stone-400 dark:text-stone-500">{t("home.emptyInspirationHint")}</p>
+                            <Button size="small" className="mt-1" onClick={() => navigate("/config")}>
+                                {t("navigation.config")}
+                            </Button>
+                        </div>
+                    ) : null}
                 </section>
             </div>
 

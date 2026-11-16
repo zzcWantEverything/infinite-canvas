@@ -9,7 +9,8 @@ import { PromptDetailDialog } from "./components/prompt-detail-dialog";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { cn } from "@/lib/utils";
 import { useAssetStore } from "@/stores/use-asset-store";
-import { ALL_PROMPTS_OPTION, type Prompt } from "@/services/api/prompts";
+import { ALL_PROMPTS_OPTION, refreshSource, type Prompt } from "@/services/api/prompts";
+import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 
 export default function PromptsPage() {
     const { message } = App.useApp();
@@ -18,9 +19,21 @@ export default function PromptsPage() {
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [selectedCategory, setSelectedCategory] = useState(ALL_PROMPTS_OPTION);
     const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
+    const [retryingSources, setRetryingSources] = useState(false);
     const addAsset = useAssetStore((state) => state.addAsset);
     const copyText = useCopyText();
     const { query, items: promptItems, tags: promptTags, categories: promptCategoryOptions, total: totalPrompts } = usePromptList({ keyword: titleKeyword, tags: selectedTags, category: selectedCategory });
+
+    // 提示词源都在 GitHub 上，网络不通时列表会一直是空的。重试要真的重新拉源，只 refetch 会拿到空缓存。
+    const retrySources = async () => {
+        setRetryingSources(true);
+        try {
+            await Promise.all(usePromptSourceStore.getState().sources.filter((source) => source.enabled).map((source) => refreshSource(source.id).catch(() => null)));
+            await query.refetch();
+        } finally {
+            setRetryingSources(false);
+        }
+    };
 
     useEffect(() => {
         if (query.isError) message.error(query.error instanceof Error ? query.error.message : t("prompts.loadFailed"));
@@ -43,6 +56,18 @@ export default function PromptsPage() {
         addAsset({ kind: "text", title: item.title, coverUrl: item.coverUrl, tags: item.tags, source: item.category, data: { content: item.prompt }, metadata: { source: "prompt-library", promptId: item.id, githubUrl: item.githubUrl } });
         message.success(t("common.addedToAssets"));
     };
+
+    const hasFilter = Boolean(titleKeyword.trim()) || selectedTags.length > 0 || selectedCategory !== ALL_PROMPTS_OPTION;
+    const emptyNode = hasFilter ? (
+        t("prompts.empty")
+    ) : (
+        <div className="mx-auto flex max-w-sm flex-col items-center gap-3">
+            <p className="text-xs leading-5 text-stone-400 dark:text-stone-500">{t("prompts.sourceEmpty")}</p>
+            <Button size="small" loading={retryingSources} onClick={() => void retrySources()}>
+                {t("prompts.retry")}
+            </Button>
+        </div>
+    );
 
     const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
         const target = event.currentTarget;
@@ -72,8 +97,8 @@ export default function PromptsPage() {
                         </aside>
                         <section className="min-w-0">
                             <Input size="large" prefix={<Search className="size-4 text-stone-400" />} value={titleKeyword} placeholder={t("prompts.search")} onChange={(event) => setTitleKeyword(event.target.value)} />
-                            {query.isLoading ? <div className="flex h-60 items-center justify-center"><Spin /></div> : null}
-                            {!query.isLoading ? <div className="mt-5"><PromptGrid items={promptItems} onOpen={setSelectedPrompt} renderActions={(item) => <Button type="text" size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => savePromptAsset(item)}>{t("common.addToAssets")}</Button>} onCopy={(item) => copyText(item.prompt, t("common.promptCopied"))} emptyText={t("prompts.empty")} /></div> : null}
+                            {query.isLoading ? <div className="flex h-60 flex-col items-center justify-center gap-3"><Spin /><span className="text-xs text-stone-400 dark:text-stone-500">{t("prompts.loadingSources")}</span></div> : null}
+                            {!query.isLoading ? <div className="mt-5"><PromptGrid items={promptItems} onOpen={setSelectedPrompt} renderActions={(item) => <Button type="text" size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => savePromptAsset(item)}>{t("common.addToAssets")}</Button>} onCopy={(item) => copyText(item.prompt, t("common.promptCopied"))} emptyText={emptyNode} /></div> : null}
                             <div className="mt-6 text-center text-xs text-stone-500 dark:text-stone-400">{query.isFetchingNextPage ? t("prompts.loading") : query.hasNextPage ? t("prompts.loadMore") : promptItems.length > 0 ? t("prompts.end") : null}</div>
                         </section>
                     </div>
@@ -90,6 +115,6 @@ function PromptFilter({ label, options, selected, onChange }: { label: string; o
     return <div><div className="mb-2 text-xs font-semibold uppercase tracking-widest text-stone-400 dark:text-stone-500">{label}</div><div className="flex flex-wrap gap-1.5">{options.map((option) => <Tag.CheckableTag key={option} checked={selected === option} className={cn("prompt-filter-tag", selected === option && "is-active")} onChange={() => onChange(option)}>{option === ALL_PROMPTS_OPTION ? t("common.all") : option}</Tag.CheckableTag>)}</div></div>;
 }
 
-function PromptGrid({ items, onOpen, onCopy, renderActions, emptyText }: { items: Prompt[]; onOpen: (item: Prompt) => void; onCopy: (item: Prompt) => void; renderActions: (item: Prompt) => ReactNode; emptyText: string }) {
+function PromptGrid({ items, onOpen, onCopy, renderActions, emptyText }: { items: Prompt[]; onOpen: (item: Prompt) => void; onCopy: (item: Prompt) => void; renderActions: (item: Prompt) => ReactNode; emptyText: ReactNode }) {
     return <div><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{items.map((item) => <PromptCard key={`${item.sourceId}:${item.id}`} item={item} onOpen={() => onOpen(item)} onCopy={() => onCopy(item)} extraAction={renderActions(item)} />)}</div>{items.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} className="py-16" /> : null}</div>;
 }

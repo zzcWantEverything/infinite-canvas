@@ -75,6 +75,9 @@ export default {
         category: "Category",
         tags: "Tags",
         search: "Search titles, content, or tags",
+        sourceEmpty: "Prompt sources haven't loaded. They live on GitHub, so a blocked network keeps this list empty.",
+        retry: "Retry",
+        loadingSources: "Loading prompt sources — the first load can take a while",
         searchTitle: "Search by title",
         loadFailed: "Failed to load prompts",
         sourceMissing: "Prompt source not found",
@@ -402,6 +405,7 @@ export default {
         inspirationSubtitle: "Start from results that already work",
         viewAll: "View all",
         emptyInspiration: "No inspiration yet",
+        emptyInspirationHint: "The built-in prompt sources live on GitHub, so a blocked network leaves this empty. Retry later, or switch sources in Settings.",
     },
     version: {
         viewUpdates: "View release updates",

@@ -396,12 +396,13 @@ export default function VideoPage() {
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
-                <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto lg:block">
+                <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto lg:block lg:pt-4">
                     <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
-                    <div className="thin-scrollbar flex flex-col rounded-2xl border border-stone-200/70 bg-background p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
+                    <div className="flex flex-col rounded-2xl border border-stone-200/70 bg-background shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-stone-800 lg:min-h-0">
+                        <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
                         <div className="flex items-start justify-between gap-3">
                             <h1 className="text-xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">{t("videoWorkbench.title")}</h1>
                             <div className="flex shrink-0 gap-2 lg:hidden">
@@ -481,7 +482,10 @@ export default function VideoPage() {
                             </div>
                         </div>
 
-                        <div className="mt-auto flex justify-end pt-6">
+                        </div>
+
+                        {/* 生成按钮固定在卡片底部：参数区很长，放在滚动内容里首屏根本点不到 */}
+                        <div className="flex shrink-0 justify-end rounded-b-2xl border-t border-stone-200 bg-background px-4 py-3 dark:border-stone-800">
                             <Button type="primary" size="large" shape="round" className="!px-7" icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 {t("workbench.generate")}
                             </Button>
@@ -520,7 +524,7 @@ export default function VideoPage() {
             <Drawer title={t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
                 <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
             </Drawer>
-            <Drawer title={t("workbench.settings")} placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+            <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
                     <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>

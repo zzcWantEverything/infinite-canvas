@@ -277,19 +277,21 @@ export default function AssetsPage() {
 
                     {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("assets.empty")} className="py-20" /> : null}
 
-                    <div className="flex justify-center">
-                        <Pagination
-                            current={page}
-                            pageSize={pageSize}
-                            total={filteredAssets.length}
-                            showSizeChanger
-                            pageSizeOptions={[10, 20, 50, 100]}
-                            onChange={(nextPage, nextPageSize) => {
-                                setPage(nextPage);
-                                setPageSize(nextPageSize);
-                            }}
-                        />
-                    </div>
+                    {filteredAssets.length ? (
+                        <div className="flex justify-center">
+                            <Pagination
+                                current={page}
+                                pageSize={pageSize}
+                                total={filteredAssets.length}
+                                showSizeChanger
+                                pageSizeOptions={[10, 20, 50, 100]}
+                                onChange={(nextPage, nextPageSize) => {
+                                    setPage(nextPage);
+                                    setPageSize(nextPageSize);
+                                }}
+                            />
+                        </div>
+                    ) : null}
                 </div>
             </main>
 
