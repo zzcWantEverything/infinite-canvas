@@ -174,7 +174,8 @@ export function isUsableRelayKey(key: string | undefined | null): boolean {
     return true;
 }
 
-export async function fetchUserVideoModels(baseUrl: string, token: string): Promise<string[]> {
+/** 当前用户分组的全部可用模型名（图片/视频/文本都在里面，由调用方按能力过滤）。 */
+export async function fetchUserModels(baseUrl: string, token: string): Promise<string[]> {
     const res = await axios.get<{ success: boolean; data?: string[] | null }>(
         authApiUrl(baseUrl, "/api/user/models"),
         { headers: { Authorization: `Bearer ${token}` }, requiresAuth: true },

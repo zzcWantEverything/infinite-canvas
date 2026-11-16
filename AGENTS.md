@@ -44,6 +44,7 @@
 - 全局 CSS 只放基础变量、全局重置、跨页面通用样式和少量第三方组件必要覆盖；不要在 `globals.css` 堆页面私有样式。
 - 代码尽量短小直接，少拆不必要组件，少做多层 props 传递，避免为了抽象堆出更多代码。
 - 前端业务数据需要浏览器本地持久化时，默认使用 `localforage`；`localStorage` 只用于极小的简单配置，不要用来保存业务列表、生成记录、图片、base64 或大 JSON。
+- 原生 `<button>` 上不要靠 Tailwind 文字颜色类（`text-white`、`text-background`）做深底反色：antd 的全局 reset 未放进 cascade layer，会盖掉 `@layer utilities` 里的 `color`，结果是深色底上出现黑字（`bg-*` 不受影响，所以只能从背景看出来）。需要强调选中态时改用浅色底 + 继承文字色（`bg-stone-200/80`），或直接用 antd 的 Button/Tag。
 
 ## 画布 UI 规范
 

@@ -16,6 +16,8 @@ export type ModelPriceFacts = {
     resolution: string;
     /** 按 token 计费的上游（Ark）用得到；不传就不提供这个用量。 */
     tokens?: number;
+    /** 目录 `pricing.examples` 里给的示例用量（图片模型按 p / cr / img / c 计费），直接并进表达式变量。 */
+    extra?: Record<string, number>;
 };
 
 /**
@@ -45,8 +47,11 @@ export function estimateModelPrice(entry: PricingModelEntry | null | undefined, 
     const resolution = resolutionForSchema(entry, facts.resolution);
     if (resolution) usage.resolution = resolution;
     if (typeof facts.tokens === "number" && Number.isFinite(facts.tokens) && facts.tokens > 0) usage.tokens = facts.tokens;
+    if (facts.extra) for (const [key, value] of Object.entries(facts.extra)) if (Number.isFinite(value)) usage[key] = value;
 
     const result = evaluateBillingExpression(entry.billingExpr, { usage });
     if (result.status !== "success" || !Number.isFinite(result.cost) || result.cost < 0) return null;
-    return result.cost;
+    // runtime 的金额单位是「微元」（fixed(n) 内部会乘 1e6），这里统一换成元，
+    // 否则下游 formatMoney 会把 5.5 元显示成 ¥5500000.00。
+    return result.cost / 1_000_000;
 }

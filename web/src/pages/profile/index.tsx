@@ -7,6 +7,7 @@ import { reportApiError } from "@/services/api/http";
 import { formatQuotaYuan } from "@/lib/quota";
 import { useUserStore } from "@/stores/use-user-store";
 import { useCopyText } from "@/hooks/use-copy-text";
+import { UsageLedger } from "./components/usage-ledger";
 
 // FIXED_BASE_URL 与 auth/index.tsx 保持一致
 const FIXED_BASE_URL = (import.meta.env.VITE_API_BASE as string || "").replace(/\/+$/, "");
@@ -117,6 +118,9 @@ export default function ProfilePage() {
                     </a>
                 </div>
             </div>
+
+            {/* 余额明细：充值、模型扣费、失败退款 */}
+            <UsageLedger baseUrl={session?.baseUrl ?? ""} token={token} />
 
             {/* 推荐计划（暂时下线，见 SHOW_AFFILIATE_PROGRAM） */}
             {SHOW_AFFILIATE_PROGRAM && (

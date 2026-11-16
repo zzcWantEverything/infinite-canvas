@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { cn } from "@/lib/utils";
 import { encodeChannelModel, guessCapability, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
-import { fetchUserVideoModels } from "@/services/api/auth";
+import { fetchUserModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
 import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
 import { fetchPricingSnapshot, type PricingModelEntry, type PricingSnapshot } from "@/services/api/pricing";
@@ -32,17 +32,18 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const [open, setOpen] = useState(false);
     const session = useUserStore((state) => state.session);
 
-    // 视频模型直接从服务器拉取，并用当前渠道 id 编码，确保 resolveModelChannel 能找到有效凭据。
+    // 模型列表直接从服务器拉取，并用当前渠道 id 编码，确保 resolveModelChannel 能找到有效凭据。
     // /api/user/models 使用 UserAuth（session token），apiKey 是渠道凭据，两者不互通。
-    const [serverVideoModels, setServerVideoModels] = useState<string[]>([]);
+    // 图片和视频都走这条路，否则本地配置里只写了一个模型时，下拉里就只见得到那一个。
+    const [serverModels, setServerModels] = useState<string[]>([]);
     useEffect(() => {
-        if (capability !== "video" || !session?.baseUrl || !session?.token) return;
+        if (!capability || !session?.baseUrl || !session?.token) return;
         const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, session.baseUrl)) ?? config.channels[0];
         const channelId = matchingChannel?.id ?? "default";
-        fetchUserVideoModels(session.baseUrl, session.token)
+        fetchUserModels(session.baseUrl, session.token)
             .then((models) => {
                 if (!models.length) return;
-                setServerVideoModels(models.map((m) => encodeChannelModel(channelId, m)));
+                setServerModels(models.map((m) => encodeChannelModel(channelId, m)));
             })
             .catch(reportApiError);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -50,10 +51,15 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
 
     const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
 
-    // 视频模型：服务器列表优先；拉到了就用服务器的，没拉到（或不是视频能力）就用配置列表。
-    // 服务端 /api/user/models 会把手动加的 GPT 生图渠道（gpt-image-*）一起返回，视频节点只该
-    // 出现视频模型，所以先按目录的 modality.output 滤一遍；目录没写 output 的再用关键词兜底。
-    const options = capability === "video" && serverVideoModels.length > 0 ? serverVideoModels.filter((model) => isVideoModel(modelOptionName(model))) : configOptions;
+    // 服务器列表优先，按能力过滤后为空才退回配置列表。
+    // 视频用内置能力表（含下架判定），其余能力先看目录的 modality.output，再退回关键词猜测。
+    const serverOptions = useMemo(() => {
+        if (!capability || !serverModels.length) return [];
+        if (capability === "video") return serverModels.filter((model) => isVideoModel(modelOptionName(model)));
+        return serverModels.filter((model) => capabilityOf(modelOptionName(model)) === capability);
+    }, [capability, serverModels]);
+    const usingServerOptions = serverOptions.length > 0;
+    const options = usingServerOptions ? serverOptions : configOptions;
 
     // 网关目录把同一款模型的多条线路归到一张卡片（variant_group），运营也会直接在展示名里
     // 写分组（「高清视觉 · sd2.5 1080P」）。两种写法都按同一套规则折叠：前缀做组标题，
@@ -111,7 +117,12 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             // 价格算不出来（表达式引用了这里不知道的用量）时留空，不猜。
             const entry = pricing?.models.get(name);
             const estimate = pricing && entry ? estimateOptionPrice(entry, name, pricing.ratio) : null;
-            const price = estimate ? t(estimate.unit === "call" ? "settingsPanels.model.pricePerCall" : "settingsPanels.model.pricePerSecond", { price: formatMoney(estimate.value) }) : "";
+            // 算不出具体金额（图片模型按 token 用量计费）时至少说明计费方式，别留空白。
+            const price = estimate
+                ? t(estimate.unit === "call" ? "settingsPanels.model.pricePerCall" : "settingsPanels.model.pricePerSecond", { price: formatMoney(estimate.value) })
+                : entry
+                  ? t("settingsPanels.model.pricePerUsage")
+                  : "";
             if (parts.length || price) summaries.set(option, { detail: parts.join(" · "), price });
         }
         return summaries;
@@ -120,20 +131,20 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
     const current = useMemo(() => {
         const raw = value || "";
-        if (capability !== "video" || !serverVideoModels.length) return raw;
-        if (serverVideoModels.includes(raw)) return raw;
+        if (!usingServerOptions) return raw;
+        if (options.includes(raw)) return raw;
         // 提取纯模型名后查找对应编码
         const modelName = modelOptionName(raw);
-        return serverVideoModels.find((m) => modelOptionName(m) === modelName) ?? "";
-    }, [capability, serverVideoModels, value]);
+        return options.find((m) => modelOptionName(m) === modelName) ?? "";
+    }, [usingServerOptions, options, value]);
 
     // 节点上残留的模型名不在服务端列表里（例如已下架的 ark 模型）时，自动纠正为列表首个可用模型。
     // 否则界面显示为空，但节点里仍存着旧模型名，用户不重新选就会把已下线的模型提交出去。
     useEffect(() => {
-        if (capability !== "video" || !serverVideoModels.length || current) return;
-        onChange(serverVideoModels[0]);
+        if (!usingServerOptions || current || !options.length) return;
+        onChange(options[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [capability, current, serverVideoModels]);
+    }, [usingServerOptions, current, options]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 
     useEffect(() => {
@@ -271,7 +282,12 @@ function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio:
     if (entry.modelPrice > 0) return { unit: "call", value: entry.modelPrice * ratio };
     const resolution = optionResolution(modelName, entry);
     const oneSecond = estimateModelPrice(entry, { seconds: 1, resolution });
-    if (oneSecond === null || !Number.isFinite(oneSecond) || oneSecond <= 0) return null;
+    if (oneSecond === null || !Number.isFinite(oneSecond) || oneSecond <= 0) {
+        // 图片模型按 token 用量计费（p / cr / img / c），前端推不出一次生成用多少 token，
+        // 借目录 pricing.examples 的示例用量算一次参考价，仍算不出就不报价格。
+        const exampleCost = estimateFromCatalogExample(entry, modelName, resolution);
+        return exampleCost === null ? null : { unit: "call", value: exampleCost * ratio };
+    }
     const twoSeconds = estimateModelPrice(entry, { seconds: 2, resolution });
     const byDuration = twoSeconds !== null && twoSeconds > oneSecond;
 
@@ -284,6 +300,30 @@ function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio:
 }
 
 /** 0.045 → "0.045"，0.42 → "0.42"，42.9 → "42.90"：金额最小单位是分，≥0.1 一律两位。 */
+/** 目录声明的输出模态优先，没声明时按模型名关键词猜。 */
+function capabilityOf(name: string): ModelCapability {
+    const outputs = catalogVariant(name)?.capabilities?.modality?.output;
+    if (Array.isArray(outputs) && outputs.length) {
+        if (outputs.includes("video")) return "video";
+        if (outputs.includes("image")) return "image";
+        if (outputs.includes("audio")) return "audio";
+    }
+    return guessCapability(name);
+}
+
+function estimateFromCatalogExample(entry: PricingModelEntry, modelName: string, resolution: string): number | null {
+    const facts = catalogVariant(modelName)?.pricing?.examples?.[0]?.facts;
+    if (!facts) return null;
+    const extra: Record<string, number> = {};
+    for (const [key, value] of Object.entries(facts)) {
+        const numeric = typeof value === "number" ? value : Number(value);
+        if (Number.isFinite(numeric)) extra[key] = numeric;
+    }
+    if (!Object.keys(extra).length) return null;
+    const cost = estimateModelPrice(entry, { seconds: 1, resolution, extra });
+    return cost !== null && cost > 0 ? cost : null;
+}
+
 function formatMoney(value: number) {
     // 展示价都是「表达式 × 分组倍率(1.5)」，常落到 0.735 / 1.245 这种三位小数，
     // 直接原样打印会出现「约 ¥1.245/秒」这种读不动的数字，这里统一收到分。

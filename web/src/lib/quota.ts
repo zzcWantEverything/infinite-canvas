@@ -15,3 +15,8 @@ export function quotaToYuan(quota: number | null | undefined): number {
 export function formatQuotaYuan(quota: number | null | undefined): string {
     return `¥${quotaToYuan(quota).toFixed(2)}`;
 }
+
+/** 元 → 额度。解析后端日志文案里的金额时用。 */
+export function yuanToQuota(yuan: number | null | undefined): number {
+    return Math.round((yuan ?? 0) * QUOTA_PER_UNIT);
+}
