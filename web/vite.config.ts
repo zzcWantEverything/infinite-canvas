@@ -38,6 +38,11 @@ function localPluginsManifest(): Plugin {
     };
 }
 
+// 本地开发直连线上后端：IP 的 80 端口会被 nginx 301 到 https 站点，
+// 登录请求一旦被重定向，refresh cookie 就落在错误域名上，之后所有请求都认不出 token。
+// 所以默认走 https 域名，而不是裸 IP。
+const apiTarget = (process.env.VITE_API_BASE || "https://admin.huayou.cloud").replace(/\/+$/, "");
+
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
     plugins: [react(), localPluginsManifest()],
@@ -53,11 +58,19 @@ export default defineConfig({
     server: {
         proxy: {
             "/api": {
-                target: process.env.VITE_API_BASE || "http://119.45.0.224",
+                target: apiTarget,
                 changeOrigin: true,
+                // new-api 的 /api/user/auth/refresh 会校验 Origin 与请求 Host 是否一致（SessionCookieOriginGuard）。
+                // 本地页面跑在 localhost:3000，Origin 必然对不上，这里统一改写成后端自己的来源。
+                configure: (proxy) => {
+                    proxy.on("proxyReq", (proxyReq) => {
+                        proxyReq.setHeader("Origin", apiTarget);
+                        proxyReq.setHeader("Referer", `${apiTarget}/`);
+                    });
+                },
             },
             "/v1": {
-                target: process.env.VITE_API_BASE || "http://119.45.0.224",
+                target: apiTarget,
                 changeOrigin: true,
             },
         },
