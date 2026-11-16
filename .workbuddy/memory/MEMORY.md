@@ -45,3 +45,11 @@
 cd web && npx tsc --noEmit          # 类型（允许上述 2 个历史错误）
 cd web && npx prettier --check <file>
 ```
+
+## 发布（单机，2026-11-14 补）
+
+- 部署脚本在 **`/home/ubuntu/new-api/`**（不在 `~`）：`./deploy-huayou.sh <dist目录|tgz>`、`./rollback.sh web`。
+- `:443` 与 `:80` 由 nginx 指到 `/home/ubuntu/dist` → 软链 `/home/ubuntu/releases/web/<时间戳>/`；
+  脚本切软链后自检首页，只保留最近 5 个版本。
+- 走 tgz 时包内可以裹一层目录，脚本会自己找 `index.html` 所在层提上来；找不到就中止且不动线上。
+- 校验线上 assets 必须带 `-A 'Mozilla/5.0'`：nginx 对空 UA 返 403，会误判成发布失败。
