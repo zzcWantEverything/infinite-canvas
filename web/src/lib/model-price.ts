@@ -51,7 +51,8 @@ export function estimateModelPrice(entry: PricingModelEntry | null | undefined, 
 
     const result = evaluateBillingExpression(entry.billingExpr, { usage });
     if (result.status !== "success" || !Number.isFinite(result.cost) || result.cost < 0) return null;
-    // runtime 的金额单位是「微元」（fixed(n) 内部会乘 1e6），这里统一换成元，
-    // 否则下游 formatMoney 会把 5.5 元显示成 ¥5500000.00。
-    return result.cost / 1_000_000;
+    // runtime 返回的就是元：线上表达式都是 tier("base", 3.82) / tier("base", u("seconds") * 0.65)。
+    // 只有 fixed(n) 在 runtime 内部会乘 1e6，而线上没有任何模型用 fixed ——
+    // 曾为「修正 fixed」统一除过 1e6，结果所有模型价格变成 ¥0，别再这么干。
+    return result.cost;
 }
