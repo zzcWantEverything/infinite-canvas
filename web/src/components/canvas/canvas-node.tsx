@@ -560,7 +560,9 @@ function PendingContent({ node, theme, onQuery }: Pick<NodeContentRendererProps,
             <div className="flex size-10 items-center justify-center rounded-full border-2" style={{ borderColor: theme.node.stroke }}>
                 <Clock3 className="size-4" style={{ color: theme.node.activeStroke }} />
             </div>
-            <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t("canvas.node.backgroundPending")}</div>
+            <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                {node.metadata?.mediaPending ? node.metadata?.errorDetails || t("canvas.node.mediaCongested") : t("canvas.node.backgroundPending")}
+            </div>
             {node.metadata?.videoTaskId ? <div className="text-[11px]" style={{ color: theme.node.muted }}>{t("canvas.nodeToolbar.videoTaskId")}: {node.metadata.videoTaskId}</div> : null}
             <button
                 type="button"

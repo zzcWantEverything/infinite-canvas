@@ -85,6 +85,8 @@ export type CanvasNodeMetadata = {
     videoTaskId?: string;
     /** 必须存真实 provider：断线重连后要按它选回对应的查询接口（ark/qora 与 openai 不同）。 */
     videoTaskProvider?: "openai" | "gemini" | "ark" | "qora";
+    /** 任务在上游已成功，只是视频文件没下下来（上游下载慢/网络拥堵），节点显示「生成完成、获取中」。 */
+    mediaPending?: boolean;
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
     /**

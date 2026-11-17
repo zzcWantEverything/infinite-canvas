@@ -32,7 +32,7 @@ type GeminiVideoOperation = {
     error?: { message?: string };
     response?: { generateVideoResponse?: { generatedSamples?: Array<{ video?: { uri?: string } }> } };
 };
-export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
+export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "media_pending"; error: string } | { status: "failed"; error: string };
 
 /** Results for scripted (plugin) video models, which run their own create+poll in one shot at task creation. */
 const pluginVideoResults = new Map<string, VideoGenerationResult>();
@@ -80,6 +80,7 @@ export async function waitForVideoGenerationTask(config: AiConfig, task: VideoGe
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
+        if (state.status === "media_pending") throw videoMediaPending(state.error);
         if (state.status === "failed") throw videoTaskFailed(state.error);
         if (Date.now() >= deadline) throw videoTaskPending();
         await delay(VIDEO_POLL_INTERVAL, options?.signal);
@@ -93,6 +94,17 @@ export function isVideoTaskFailed(error: unknown) {
 function videoTaskFailed(message: string) {
     const error = new Error(message);
     error.name = "VideoTaskFailed";
+    return error;
+}
+
+/** 任务在上游已成功，只是视频文件没下下来（上游下载慢/网络拥堵）。不是失败，画布按「生成完成、获取中」展示。 */
+export function isVideoMediaPending(error: unknown) {
+    return error instanceof Error && error.name === "VideoMediaPending";
+}
+
+function videoMediaPending(message: string) {
+    const error = new Error(message);
+    error.name = "VideoMediaPending";
     return error;
 }
 
@@ -242,9 +254,16 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         const url = videoResultUrl(video);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (video.status === "completed") {
-            const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
-            await assertVideoBlob(content.data);
-            return { status: "completed", result: { blob: content.data } };
+            try {
+                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+                await assertVideoBlob(content.data);
+                return { status: "completed", result: { blob: content.data } };
+            } catch (error) {
+                if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+                // 任务在上游已经成功，只是视频文件没下下来（上游文件下载慢/网络拥堵）。
+                // 不判失败：交给上层显示「生成完成、视频获取中」，保留 taskId 供重试下载。
+                return { status: "media_pending", error: apiText("videoMediaPending") };
+            }
         }
         if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
         return { status: "pending" };

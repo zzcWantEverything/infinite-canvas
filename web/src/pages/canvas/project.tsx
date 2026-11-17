@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
-import { createVideoGenerationTask, isVideoTaskFailed, isVideoTaskPending, pollVideoGenerationTask, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, isVideoTaskPending, pollVideoGenerationTask, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
@@ -446,8 +446,10 @@ function InfiniteCanvasPage() {
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const pending = isVideoTaskPending(error);
+                // 上游任务已成功、只是视频文件没下下来（网络拥堵）：不报失败，节点显示「获取中」+ 重试。
+                const mediaPending = isVideoMediaPending(error);
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
+                if (!pending && !mediaPending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -455,8 +457,9 @@ function InfiniteCanvasPage() {
                                   ...item,
                                   metadata: {
                                       ...item.metadata,
-                                      status: pending ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
-                                      errorDetails: pending || item.metadata?.content ? undefined : errorDetails,
+                                      status: pending || mediaPending ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                      errorDetails: pending || (!mediaPending && item.metadata?.content) ? undefined : errorDetails,
+                                      mediaPending: mediaPending || undefined,
                                       ...(isVideoTaskFailed(error) ? { videoTaskId: undefined } : {}),
                                   },
                               }
@@ -515,6 +518,12 @@ function InfiniteCanvasPage() {
                     const errorDetails = state.error || t("canvas.projectPage.generationFailed");
                     notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, videoTaskId: undefined } } : item)));
+                    return;
+                }
+                if (state.status === "media_pending") {
+                    // 上游任务已成功，只是文件还在下载（网络拥堵）：保持「获取中」，让用户再点一次重试。
+                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_PENDING, errorDetails: state.error, mediaPending: true } } : item)));
+                    message.info(state.error);
                     return;
                 }
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_PENDING, errorDetails: undefined } } : item)));
@@ -2901,7 +2910,8 @@ function InfiniteCanvasPage() {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
                 const pending = isVideoTaskPending(error);
-                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
+                const mediaPending = isVideoMediaPending(error);
+                if (!pending && !mediaPending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((node) =>
                         node.id === nodeId || pendingChildIds.includes(node.id)
@@ -2911,8 +2921,9 @@ function InfiniteCanvasPage() {
                                       ...node,
                                       metadata: {
                                           ...node.metadata,
-                                          status: pending ? NODE_STATUS_PENDING : NODE_STATUS_ERROR,
+                                          status: pending || mediaPending ? NODE_STATUS_PENDING : NODE_STATUS_ERROR,
                                           errorDetails: pending ? undefined : errorDetails,
+                                          mediaPending: mediaPending || undefined,
                                           ...(isVideoTaskFailed(error) && node.type === CanvasNodeType.Video ? { videoTaskId: undefined } : {}),
                                       },
                                   }
