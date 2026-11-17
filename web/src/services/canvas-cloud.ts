@@ -38,6 +38,8 @@ type MediaMeta = {
     height?: number;
     duration_ms?: number;
     project_id?: string;
+    /** 本地上传键（video:xxx）。登记到服务端后，换设备也能把历史文档里的本地键对回云端文件。 */
+    local_key?: string;
 };
 
 const cloudMap = localforage.createInstance({ name: "infinite-canvas", storeName: "cloud_media_map" });
@@ -75,6 +77,7 @@ export async function uploadToCloud(blob: Blob, kind: string, mimeType: string, 
     if (!putRes.ok) throw new Error(`上传失败（HTTP ${putRes.status}）`);
     await api("POST", "/api/canvas/media", {
         object_key: presign.object_key,
+        local_key: meta?.local_key,
         kind,
         mime_type: mimeType || "application/octet-stream",
         bytes: blob.size,
@@ -86,6 +89,24 @@ export async function uploadToCloud(blob: Blob, kind: string, mimeType: string, 
     return presign.object_key;
 }
 
+const inflightUploads = new Set<Promise<unknown>>();
+
+/** 跟踪一个素材上传，供推送画布前等待：避免文档推得比素材快，把本地键存进云端。 */
+export function trackCloudUpload<T>(promise: Promise<T>): Promise<T> {
+    inflightUploads.add(promise);
+    void promise.catch(() => undefined).finally(() => inflightUploads.delete(promise));
+    return promise;
+}
+
+/** 等当前所有上传落地（最多 timeoutMs），让 serializeDoc 能拿到真实 object_key。 */
+export async function awaitCloudUploads(timeoutMs = 8000): Promise<void> {
+    if (!inflightUploads.size) return;
+    await Promise.race([
+        Promise.allSettled([...inflightUploads]),
+        new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+}
+
 export async function getCloudMediaUrls(keys: string[]): Promise<Record<string, string>> {
     const data = await api<{ urls: Record<string, string> }>("POST", "/api/canvas/media/urls", { keys });
     return data.urls || {};
@@ -93,8 +114,25 @@ export async function getCloudMediaUrls(keys: string[]): Promise<Record<string, 
 
 // ===== 本地 storageKey -> objectKey 映射 =====
 
-export async function objectKeyFor(localKey: string): Promise<string | null> {
+async function localObjectKeyFor(localKey: string): Promise<string | null> {
     return cloudMap.getItem<string>(localKey).catch(() => null);
+}
+
+export async function objectKeyFor(localKey: string): Promise<string | null> {
+    const cached = await localObjectKeyFor(localKey);
+    if (cached) return cached;
+    // 本地映射丢了（换设备 / 换浏览器）：问服务端，历史画布的本地键靠这一步找回云端文件。
+    const remote = await fetchMediaKeys([localKey]).catch((): Record<string, string> => ({}));
+    const objectKey = remote[localKey] || null;
+    if (objectKey) await cloudMap.setItem(localKey, objectKey).catch(() => undefined);
+    return objectKey;
+}
+
+/** 批量按本地键查云端 object_key。只返回当前用户名下登记过的。 */
+export async function fetchMediaKeys(localKeys: string[]): Promise<Record<string, string>> {
+    if (!localKeys.length) return {};
+    const data = await api<{ keys: Record<string, string> }>("POST", "/api/canvas/media/keys", { local_keys: localKeys });
+    return data.keys || {};
 }
 
 export async function recordObjectKey(localKey: string, objectKey: string) {
@@ -163,12 +201,76 @@ async function rewriteStorageKeys<T>(value: T, mapper: (key: string) => Promise<
     return value;
 }
 
-/** 把本地画布对象序列化成云端 doc：storageKey 有映射就替换成 objectKey。 */
+/** 收集结构里所有 storageKey（同步）。 */
+function collectStorageKeys(value: unknown, out: Set<string>) {
+    if (Array.isArray(value)) {
+        for (const item of value) collectStorageKeys(item, out);
+        return;
+    }
+    if (value && typeof value === "object") {
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+            if (k === "storageKey" && typeof v === "string") out.add(v);
+            else collectStorageKeys(v, out);
+        }
+    }
+}
+
+/**
+ * 把本地画布对象序列化成云端 doc：storageKey 有映射就替换成 objectKey。
+ * 先收集所有本地键、批量问服务端一次（换设备时本地映射为空，靠服务端兜底），
+ * 避免每个 storageKey 都打一次接口。
+ */
 export async function serializeDoc(project: { [key: string]: unknown }): Promise<string> {
+    const all = new Set<string>();
+    collectStorageKeys(project, all);
+    const pending = [...all].filter((key) => !key.startsWith("media/") && !key.startsWith("data:"));
+    const remoteKeys = await fetchMediaKeys(pending).catch((): Record<string, string> => ({}));
     const rewritten = await rewriteStorageKeys(project, async (key) => {
-        if (key.startsWith("media/")) return key;
-        const objectKey = await objectKeyFor(key);
+        if (key.startsWith("media/") || key.startsWith("data:")) return key;
+        const objectKey = (await localObjectKeyFor(key)) || remoteKeys[key];
+        if (objectKey) await cloudMap.setItem(key, objectKey).catch(() => undefined);
         return objectKey || key;
     });
     return JSON.stringify(rewritten);
+}
+
+/**
+ * 打开画布时修复云端文档里残留的本地键：历史文档存的是 video:xxx / image:xxx，
+ * 换设备后靠服务端映射把它们改写成 object_key 并重推，文档从此不再依赖本地映射。
+ * 返回是否真的改写了。
+ */
+export async function repairCloudProjectMediaKeys(cloudProjectId: string): Promise<boolean> {
+    const project = await getCloudProject(cloudProjectId);
+    if (!project) return false;
+    let doc: unknown;
+    try {
+        doc = JSON.parse(project.doc || "{}");
+    } catch {
+        return false;
+    }
+    const all = new Set<string>();
+    collectStorageKeys(doc, all);
+    const pending = [...all].filter((key) => !key.startsWith("media/") && !key.startsWith("data:"));
+    if (!pending.length) return false;
+    const remoteKeys = await fetchMediaKeys(pending).catch((): Record<string, string> => ({}));
+    // 原浏览器首次修复时，服务端还没登记 local_key（历史数据），本地 cloud_media_map 才是有的那份，优先用它。
+    for (const key of pending) {
+        if (remoteKeys[key]) continue;
+        const local = await localObjectKeyFor(key);
+        if (local) remoteKeys[key] = local;
+    }
+    if (!Object.keys(remoteKeys).length) return false;
+    let changed = false;
+    const rewritten = await rewriteStorageKeys(doc, async (key) => {
+        if (key.startsWith("media/") || key.startsWith("data:")) return key;
+        const objectKey = remoteKeys[key];
+        if (objectKey) {
+            changed = true;
+            return objectKey;
+        }
+        return key;
+    });
+    if (!changed) return false;
+    await saveCloudProject(cloudProjectId, project.title, JSON.stringify(rewritten), project.revision);
+    return true;
 }

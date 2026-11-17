@@ -1,7 +1,7 @@
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 
-import { getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, uploadToCloud } from "@/services/canvas-cloud";
+import { getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, trackCloudUpload, uploadToCloud } from "@/services/canvas-cloud";
 import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
@@ -17,7 +17,8 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     objectUrls.set(storageKey, url);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
     // 云端同步是 fire-and-forget：本地 blob 已经秒回显，上传在后台进行，失败静默。
-    void syncMediaToCloud(storageKey, blob, prefix, meta);
+    // 但要登记成「进行中的上传」，推送画布文档前会等它落地，否则会存成本地键。
+    trackCloudUpload(syncMediaToCloud(storageKey, blob, prefix, meta));
     return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
 }
 
@@ -99,6 +100,7 @@ async function syncMediaToCloud(storageKey: string, blob: Blob, prefix: string, 
             width: meta.width,
             height: meta.height,
             duration_ms: meta.durationMs,
+            local_key: storageKey,
         });
         await recordObjectKey(storageKey, objectKey);
     } catch {

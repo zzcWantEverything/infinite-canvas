@@ -11,7 +11,7 @@ import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, isVi
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { pushProjectToCloud } from "@/services/canvas-cloud-sync";
+import { pushProjectToCloud, repairProjectMediaKeysByLocalId } from "@/services/canvas-cloud-sync";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -589,6 +589,9 @@ function InfiniteCanvasPage() {
         }
 
         const restore = async () => {
+            // 打开画布时顺手修复云端文档里残留的本地键（历史 doc 存的是 video:xxx），
+            // 换设备后靠服务端映射改回 object_key，不阻塞本地渲染。
+            void repairProjectMediaKeysByLocalId(projectId);
             const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);

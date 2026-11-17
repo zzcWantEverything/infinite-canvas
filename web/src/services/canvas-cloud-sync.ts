@@ -1,6 +1,6 @@
 import localforage from "localforage";
 
-import { createCloudProject, getCloudProject, isCloudEnabled, listCloudProjects, saveCloudProject, serializeDoc, type CloudProject } from "@/services/canvas-cloud";
+import { awaitCloudUploads, createCloudProject, getCloudProject, isCloudEnabled, listCloudProjects, repairCloudProjectMediaKeys, saveCloudProject, serializeDoc, type CloudProject } from "@/services/canvas-cloud";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 
@@ -57,6 +57,8 @@ export async function pushProjectToCloud(project: CanvasProject) {
             link = { cloudId: created.id, revision: created.revision };
             await setLink(project.id, link);
         }
+        // 等还在上传的素材落地，serializeDoc 才能把它们替换成 object_key，而不是存成本地键。
+        await awaitCloudUploads();
         const doc = await serializeDoc(project);
         const res = await saveCloudProject(link.cloudId, project.title, doc, link.revision);
         if (res.conflict) {
@@ -90,6 +92,9 @@ export async function pullCloudToLocal() {
 
         const merged = [...local];
         for (const cloud of list) {
+            // 先把云端文档里残留的本地键（video:xxx）修回 object_key 并重推，
+            // 换设备/换浏览器也能正常加载历史素材；失败不影响下面的拉取。
+            await repairCloudProjectMediaKeys(cloud.id).catch(() => false);
             const detail = await getCloudProject(cloud.id);
             if (!detail) continue;
             const localId = cloudToLocalId.get(cloud.id) ?? cloud.id;
@@ -103,4 +108,11 @@ export async function pullCloudToLocal() {
     } catch {
         // 拉取失败静默，保留本地数据。
     }
+}
+
+/** 按本地画布 id 修复其云端文档里的本地键（直接打开画布时触发，不依赖先经过画布库）。 */
+export async function repairProjectMediaKeysByLocalId(localId: string): Promise<void> {
+    const link = await getLink(localId);
+    if (!link) return;
+    await repairCloudProjectMediaKeys(link.cloudId).catch(() => false);
 }
