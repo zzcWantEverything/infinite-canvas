@@ -69,7 +69,7 @@ export default function ProfilePage() {
     const affLink = affCode ? `${window.location.origin}/sign-up?aff=${affCode}` : "";
 
     return (
-        <div className="mx-auto max-w-2xl space-y-5 px-4 py-8">
+        <div className="mx-auto h-full max-w-2xl space-y-5 overflow-y-auto px-4 py-8">
             <h1 className="text-xl font-semibold text-stone-900 dark:text-stone-100">钱包</h1>
 
             {/* 余额统计 */}
