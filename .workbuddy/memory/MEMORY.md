@@ -17,6 +17,26 @@
 - 拦截器对取消请求**原样放行**（`axios.isCancel` 提前 return），否则会破坏画布 `AbortError` 的静默取消语义。改这段前先确认 `lib/canvas/canvas-generation-helpers.ts` 的取消判定。
 - 依赖登录态的接口必须加 `requiresAuth: true`（模块增强字段），否则 401 不会触发登出。目前只在 `auth.ts` 的 6 个用户态接口上标。
 - 登录态：后端无 refresh token（New API 风格），只做「启动校验 + 401/`success:false` 清会话重登录」。跳转由 `AuthGuard` 自动完成，**不要手写 navigate**。
+- **上游错误脱敏**：`lib/upstream-error.ts` 的 `humanizeUpstreamError()` 命中「渠道不可用 / 当前可用渠道 / channel 可传渠道 / not served by this plugin」就整段替换成「该模型当前线路不可用」，收敛在 `http.ts` 的 `toApiError` / `readAxiosError`（toast、节点、失败卡片全覆盖），画布老节点的 `errorDetails` 渲染时再兜一次。自家后端文案（余额不足等）不匹配这些词、原样透出。
+
+## 模型目录与模型选择（2026-11 起）
+
+- 模型目录 `/api/user/models/catalog`（`services/api/model-catalog.ts`）：模块级缓存 + 5min TTL，登录后 `AuthGuard` 拉一次。
+  读缓存用 `catalogVariant(name)` / `catalogGroupOf(name)`，版本通知用 `modelCatalogVersion()`（`useSyncExternalStore(subscribeModelCatalog, ...)`）。
+  **能力 / 展示名 / billingUnit 的唯一来源是目录**，不要凭模型名猜。
+- 视频节点模型列表 = `/api/user/models`（`fetchUserVideoModels`）再用 `isVideoModel()` 过滤（`model-picker.tsx`）：
+  目录 `capabilities.modality.output` 含 `video` 才是视频；目录没拉到先保留；目录有模型但没 output（手动加的 GPT 生图渠道）退回 `guessCapability` 关键词。
+  图片节点走 `selectableModelsByCapability(config, "image")`（渠道 capability 标签过滤）。
+- 计价单位 = `catalogVariant(name).capabilities.billingUnit`（`second`/`request`）。不要用「1 秒和 2 秒是否同价」启发式——阶梯起步价（如 ≤5 秒一口价、之后按秒）会误判成按次。
+- 展示名格式「组名 · 型号 分辨率[ 按秒]」，`model-picker-groups.ts` 按 `" · "` 切成「组标题 + 线路名」，没 ` · ` 就整串当名字。
+
+## 画布交互（2026-11 中）
+
+- **新建节点菜单**：右键空白画布触发（`preventCanvasContextMenu` 里 `setNodeCreatePosition`）；双击空白只关菜单。选择参考图模式下右键不弹。
+- **拖入图片**：节点统一成视频比例（横 16:9 / 竖 9:16，`nodeSizeFromRatio`），内容 `object-contain`；不再按图片原始宽高比浮动。
+- **云存储前端**（`8b44fd9` 已发布）：`canvas-cloud.ts`（/api/canvas/* + COS 预签名直传、签名回放）、
+  `canvas-cloud-sync.ts`（项目 push/pull，本地 id↔云端 uuid 映射，冲突以服务端为准）、`file-storage`/`image-storage`
+  （本地 blob 秒回显 + fire-and-forget 传云，objectKey 映射存 localforage）。后端对应 new-api `/api/canvas/*`（`cc75bc8f9` 已上线）。
 
 ## 画布渲染约定
 
