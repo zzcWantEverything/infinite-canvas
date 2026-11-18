@@ -64,7 +64,7 @@ export default function CopyVideoPage() {
         setAnalysis(null);
         try {
             setProgress(t("copyVideo.extracting"));
-            const { frames, meta } = await extractSceneFrames(file, 16);
+            const { frames, meta } = await extractSceneFrames(file, 32);
             setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
             const grid = await buildFrameGrid(frames);
             setProgress(t("copyVideo.analyzing"));

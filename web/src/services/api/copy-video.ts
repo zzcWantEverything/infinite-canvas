@@ -80,7 +80,7 @@ export function aiTextHeaders(config: AiConfig) {
  * 差异超过阈值就判定为「镜头切换」，保留该时刻的高清帧；再均匀补齐到 maxFrames。
  * 相比固定间隔抽帧，关键镜头不容易漏，重复帧也不会占满额度。
  */
-export async function extractSceneFrames(file: File, maxFrames = 16, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
+export async function extractSceneFrames(file: File, maxFrames = 32, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
     const src = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.src = src;
@@ -144,7 +144,7 @@ export async function extractSceneFrames(file: File, maxFrames = 16, signal?: Ab
         // 这样同一个场景里的动作推进也能被看到，而不是每个场景只有一张定格。
         const threshold = 0.06;
         const sceneChanges = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
-        const framesPerScene = 3;
+        const framesPerScene = 4;
         const picked: typeof candidates = [];
         for (let i = 0; i < sceneChanges.length; i++) {
             const startTime = sceneChanges[i].time;
@@ -184,8 +184,8 @@ export async function extractSceneFrames(file: File, maxFrames = 16, signal?: Ab
 
 /** 把关键帧拼成宫格图（每格带序号和时间），一次请求就能让模型看到整条时间线。 */
 export async function buildFrameGrid(frames: CopyFrame[], cols = 4): Promise<string> {
-    const cellWidth = 280;
-    const cellHeight = 158;
+    const cellWidth = 200;
+    const cellHeight = 112;
     const labelHeight = 18;
     const rows = Math.ceil(frames.length / cols);
     const canvas = document.createElement("canvas");
