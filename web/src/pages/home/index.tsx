@@ -186,9 +186,6 @@ export default function IndexPage() {
                         <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-stone-200 px-6 py-14 text-center dark:border-stone-800">
                             <p className="text-sm font-medium text-stone-600 dark:text-stone-300">{t("home.emptyInspiration")}</p>
                             <p className="max-w-md text-xs leading-5 text-stone-400 dark:text-stone-500">{t("home.emptyInspirationHint")}</p>
-                            <Button size="small" className="mt-1" onClick={() => navigate("/config")}>
-                                {t("navigation.config")}
-                            </Button>
                         </div>
                     ) : null}
                 </section>

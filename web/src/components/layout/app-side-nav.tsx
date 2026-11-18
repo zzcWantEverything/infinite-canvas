@@ -1,4 +1,4 @@
-import { Compass, Settings } from "lucide-react";
+import { Compass } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -33,9 +33,6 @@ export function AppSideNav() {
                 ))}
             </nav>
 
-            <div className="mt-auto flex w-full flex-col items-center pt-3">
-                <SideNavItem to="/config" icon={Settings} label={t("navigation.config")} active={pathname.startsWith("/config")} />
-            </div>
         </aside>
     );
 }

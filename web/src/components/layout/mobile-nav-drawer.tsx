@@ -1,5 +1,5 @@
 import { Drawer } from "antd";
-import { Compass, Settings } from "lucide-react";
+import { Compass } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -40,12 +40,6 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDraw
                 })}
             </div>
 
-            <div className="mt-4 border-t border-stone-200 pt-4 dark:border-stone-800">
-                <Link to="/config" onClick={onClose} className={itemClass(pathname.startsWith("/config"))}>
-                    <Settings className="size-5" />
-                    <span>{t("navigation.config")}</span>
-                </Link>
-            </div>
         </Drawer>
     );
 }
