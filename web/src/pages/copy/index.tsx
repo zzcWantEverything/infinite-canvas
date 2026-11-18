@@ -4,7 +4,8 @@ import { Clapperboard, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide
 import { useTranslation } from "react-i18next";
 
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { analyzeVideoGrid, buildFrameGrid, extractSceneFrames, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { useUserStore } from "@/stores/use-user-store";
 
 const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
 /** 分析用的多模态模型：zcapi(OpenAI 渠道) 的 gpt 系列，支持图片输入。 */
@@ -67,8 +68,20 @@ export default function CopyVideoPage() {
             const { frames, meta } = await extractSceneFrames(file, 32);
             setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
             const grid = await buildFrameGrid(frames);
+            // 音轨转写（失败降级为无台词，不阻塞分析）
+            setProgress(t("copyVideo.transcribing"));
+            let transcript = "";
+            const session = useUserStore.getState().session;
+            if (session?.token) {
+                try {
+                    const audio = await extractAudioWav(file);
+                    if (audio) transcript = await transcribeAudio(config.baseUrl, session.token, audio.blob);
+                } catch {
+                    transcript = "";
+                }
+            }
             setProgress(t("copyVideo.analyzing"));
-            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL);
+            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, transcript);
             setAnalysis(result);
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
@@ -227,6 +240,13 @@ export default function CopyVideoPage() {
                                             <Button size="small" type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeShot(shot.id)} />
                                         </div>
                                         <Input.TextArea value={shot.description} onChange={(event) => updateShot(shot.id, { description: event.target.value })} rows={2} placeholder={t("copyVideo.shotDescPlaceholder")} />
+                                        <Input.TextArea
+                                            value={shot.dialogue}
+                                            onChange={(event) => updateShot(shot.id, { dialogue: event.target.value })}
+                                            rows={1}
+                                            placeholder={t("copyVideo.dialoguePlaceholder")}
+                                            className="!text-xs"
+                                        />
                                         <div className="flex flex-wrap gap-1">
                                             {[...shot.roles, ...shot.scenes, ...shot.items].map((tag) => (
                                                 <span key={tag} className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-300">
