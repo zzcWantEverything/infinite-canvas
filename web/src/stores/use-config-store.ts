@@ -244,6 +244,10 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
+    // 图片：服务器目录里的模型（miniKey tt-image-* / banana-* 等）不在本地 config.channels，
+    // 用 modelMatchesCapability 会判成不可用而退回默认，表现为「选了不回显、生成还是旧模型」。
+    // 图片节点选过的模型直接放行；真正的下架模型由 ModelPicker 的自动纠正（onChange 首个可用）兜住。
+    if (capability === "image" && currentModel) return currentModel;
     if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
     // 视频：上面两级都可能指向已下架的模型（节点旧值、用户配置的默认值），
     // 这时退回当前仍可选的视频模型，避免继续把下架模型提交出去。
