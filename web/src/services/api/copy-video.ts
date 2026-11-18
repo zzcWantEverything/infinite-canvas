@@ -1,6 +1,6 @@
 import axios from "axios";
 
-import { buildApiUrl, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 
 /** 爆款转绘的中间结构：角色/场景/物品 + 分镜。 */
 export type CopyItem = {
@@ -108,10 +108,13 @@ export async function analyzeVideoFrames(config: AiConfig, frames: CopyFrame[], 
         content.push({ type: "text", text: `第 ${index + 1} 帧（≈${Math.round(frame.time)} 秒）：` });
         content.push({ type: "image_url", image_url: { url: frame.dataUrl } });
     });
+    // 必须走 resolveModelRequestConfig：登录模式下顶层 config.apiKey 是空的，
+    // 真正可用的 key 和 baseUrl 在渠道上（和其他 relay 请求保持一致），否则会 401「无效的令牌」。
+    const requestConfig = resolveModelRequestConfig(config, model);
     const response = await axios.post(
-        aiTextUrl(config, "/chat/completions"),
+        aiTextUrl(requestConfig, "/chat/completions"),
         { model, messages: [{ role: "user", content }], max_tokens: 4000 },
-        { headers: aiTextHeaders(config), signal, timeout: 180000 },
+        { headers: aiTextHeaders(requestConfig), signal, timeout: 180000 },
     );
     const text: string = response.data?.choices?.[0]?.message?.content || "";
     const json = extractJson(text);
