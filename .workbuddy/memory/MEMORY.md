@@ -74,3 +74,27 @@ cd web && npx prettier --check <file>
   脚本切软链后自检首页，只保留最近 5 个版本。
 - 走 tgz 时包内可以裹一层目录，脚本会自己找 `index.html` 所在层提上来；找不到就中止且不动线上。
 - 校验线上 assets 必须带 `-A 'Mozilla/5.0'`：nginx 对空 UA 返 403，会误判成发布失败。
+
+## 爆款转绘 /copy（2026-11-18）
+
+- **入口**：侧栏「复刻视频」（`slug: "copy"`，`constant/navigation-tools.ts`）+ 路由 `/copy`。
+  **线上默认隐藏**：`app-side-nav.tsx` 与 `mobile-nav-drawer.tsx` 在渲染前用
+  `navigationTools.filter((tool) => import.meta.env.DEV || tool.slug !== "copy")` 过滤；路由保留，dev 直接访问 `/copy`。
+- **流程**（`pages/copy/index.tsx` + `services/api/copy-video.ts`）：
+  1. 上传视频（≤150MB，**≤10 分钟**，超时直接拒绝）
+  2. `extractSceneFrames`：纯 canvas 场景检测——0.4s/1s/2s 动态步长采样 64x36 缩略图算像素差，阈值 0.06 判镜头切换，
+     每个场景区间抽 3~4 帧、上限 **32 帧**（每帧 640 长边）
+  3. `buildFrameGrid`：4 列宫格 200x112/格、标 `#序号 时间`，整图 800x896 **控制在 1024 内避免模型降采样**
+  4. `extractAudioWav`：`AudioContext.decodeAudioData` + `OfflineAudioContext` 重采样 16kHz 单声道、手写 WAV 编码
+     （**不装 ffmpeg**；HEVC/AC3 等浏览器不认的编码返回 null 降级）
+  5. `transcribeAudio`：调 new-api `POST /api/user/copy/transcribe`（腾讯云 ASR 代理，**用 session token 不是渠道 apiKey**），拿带时间戳台词
+  6. `analyzeVideoGrid`：宫格图 + 元数据 + 台词一起给 `gpt-6-sol`，输出角色/场景/物品 + 分镜（分镜含 `dialogue` 字段）
+- **模型调用必须走 `resolveModelRequestConfig`**：登录模式顶层 `config.apiKey` 是空的，真正可用的 relay key 在渠道上
+  （启动时 `resolveRelayApiKey` 用 session token 换好）。直接读顶层 apiKey 会 401「无效的令牌」。
+- **图片节点的模型回显**（2026-11-18 修）：`resolveModelForCapability` 只在本地 `config.channels` 里匹配，服务器目录里的图片模型
+  不在其中，会被判不可用退回默认——表现是「选了不回显、生成还是旧模型」。已在 `stores/use-config-store.ts` 对 `capability === "image"`
+  放行 `currentModel`，并让 `buildNodeConfig` / 图片 ModelPicker 的 value 优先用 `node.metadata.model`。
+- **隐藏的入口**（2026-11-18）：「配置」全链路下线——侧栏/移动端抽屉入口移除、`/config` 重定向首页、
+  `app-top-nav` 不再渲染 `AppConfigModal`、SSO 导入后不再弹配置、首页灵感空态的「去配置」按钮移除。
+  `pages/config` 文件保留（恢复只需改回路由）。
+- **灵感广场已移除**：首页不再拉 `fetchPrompts`，只保留创作入口（标题+输入框+模式切换+建议词）。
