@@ -29,8 +29,21 @@ export type CopyAnalysis = {
 
 export type CopyFrame = { time: number; dataUrl: string };
 
-const ANALYSIS_PROMPT = `你是一名专业的短视频分镜分析师。用户会上传一个视频按时间顺序抽取的若干帧（每帧对应一个大致时间点）。
-请分析这些画面，输出用于"爆款转绘"的结构化信息，必须严格返回 JSON（不要 markdown 代码块），结构如下：
+export type CopyVideoMeta = {
+    duration: number;
+    width: number;
+    height: number;
+    frameCount: number;
+    sceneCount: number;
+};
+
+function analysisPrompt(meta: CopyVideoMeta) {
+    return `你是一名专业的短视频分镜分析师。用户上传了一个视频按时间顺序拼接的宫格图（每格左上角标了序号和大致时间点），以及视频元数据：
+- 时长：${meta.duration.toFixed(1)} 秒
+- 分辨率：${meta.width}x${meta.height}
+- 抽帧数：${meta.frameCount}（已按画面差异挑选关键帧，共 ${meta.sceneCount} 个场景切换）
+
+请根据宫格图分析视频内容，严格返回 JSON（不要 markdown 代码块），结构如下：
 
 {
   "title": "一句话概括视频主题",
@@ -39,16 +52,17 @@ const ANALYSIS_PROMPT = `你是一名专业的短视频分镜分析师。用户�
   "items": [{ "name": "物品名", "description": "外观、材质、颜色等可复用于生图的描述" }],
   "shots": [{
     "start": "0.5秒", "end": "6.7秒",
-    "description": "这一镜头的画面内容、人物动作、镜头运动、景别、台词/口播要点",
+    "description": "这一镜头的画面内容、人物动作、镜头运动、景别",
     "roles": ["该镜头出现的角色名"], "scenes": ["该镜头所在场景名"], "items": ["该镜头出现的关键物品名"]
   }]
 }
 
 要求：
 1. 角色/场景/物品去重合并，同一对象只出现一次，名称简短。
-2. 分镜按时间顺序，尽量覆盖全部帧；start/end 用"X秒"格式。
+2. 分镜按时间顺序，尽量覆盖全部格；每个场景切换至少要有一个分镜。
 3. 所有名称必须与 roles/scenes/items 里的 name 完全一致。
 4. 只输出 JSON。`;
+}
 
 export function aiTextUrl(config: AiConfig, path: string) {
     return buildApiUrl(config.baseUrl, path);
@@ -58,8 +72,12 @@ export function aiTextHeaders(config: AiConfig) {
     return { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" };
 }
 
-/** 浏览器端抽帧：在视频上按等间隔取 N 帧，缩到 1280 长边，返回 JPEG dataURL。 */
-export async function extractVideoFrames(file: File, count = 6, signal?: AbortSignal): Promise<CopyFrame[]> {
+/**
+ * 场景检测抽帧：按固定步长采样小缩略图，和上一张比较像素差异，
+ * 差异超过阈值就判定为「镜头切换」，保留该时刻的高清帧；再均匀补齐到 maxFrames。
+ * 相比固定间隔抽帧，关键镜头不容易漏，重复帧也不会占满额度。
+ */
+export async function extractSceneFrames(file: File, maxFrames = 9, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
     const src = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.src = src;
@@ -74,51 +92,128 @@ export async function extractVideoFrames(file: File, count = 6, signal?: AbortSi
         });
         const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
         if (!duration) throw new Error("视频时长读取失败");
-        const maxEdge = 800;
-        const scale = Math.min(1, maxEdge / Math.max(video.videoWidth || maxEdge, video.videoHeight || maxEdge));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round((video.videoWidth || maxEdge) * scale));
-        canvas.height = Math.max(1, Math.round((video.videoHeight || maxEdge) * scale));
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("浏览器不支持 canvas 抽帧");
-        const frames: CopyFrame[] = [];
-        const total = Math.max(1, Math.min(count, Math.ceil(duration / 1.5)));
-        for (let i = 0; i < total; i++) {
-            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-            const time = (duration * (i + 0.5)) / total;
-            await new Promise<void>((resolve, reject) => {
+        const width = video.videoWidth || 0;
+        const height = video.videoHeight || 0;
+        if (!width || !height) throw new Error("视频分辨率读取失败");
+
+        const thumb = document.createElement("canvas");
+        thumb.width = 64;
+        thumb.height = 36;
+        const thumbCtx = thumb.getContext("2d", { willReadFrequently: true });
+        const fullMaxEdge = 640;
+        const scale = Math.min(1, fullMaxEdge / Math.max(width, height));
+        const full = document.createElement("canvas");
+        full.width = Math.max(1, Math.round(width * scale));
+        full.height = Math.max(1, Math.round(height * scale));
+        const fullCtx = full.getContext("2d");
+        if (!thumbCtx || !fullCtx) throw new Error("浏览器不支持 canvas 抽帧");
+
+        const seek = (time: number) =>
+            new Promise<void>((resolve, reject) => {
                 video.onseeked = () => resolve();
                 video.onerror = () => reject(new Error("抽帧失败"));
-                video.currentTime = Math.min(time, Math.max(0, duration - 0.05));
+                video.currentTime = Math.min(Math.max(time, 0), Math.max(0, duration - 0.05));
             });
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            frames.push({ time, dataUrl: canvas.toDataURL("image/jpeg", 0.72) });
+
+        const step = 0.4;
+        let previous: Uint8ClampedArray | null = null;
+        const candidates: { time: number; diff: number; dataUrl: string }[] = [];
+        for (let t = 0; t < duration; t += step) {
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            await seek(t);
+            thumbCtx.drawImage(video, 0, 0, thumb.width, thumb.height);
+            const pixels = thumbCtx.getImageData(0, 0, thumb.width, thumb.height).data;
+            let diff = 0;
+            if (previous) {
+                for (let i = 0; i < pixels.length; i += 4) {
+                    diff += Math.abs(pixels[i] - previous[i]) + Math.abs(pixels[i + 1] - previous[i + 1]) + Math.abs(pixels[i + 2] - previous[i + 2]);
+                }
+                diff /= (pixels.length / 4) * 3 * 255;
+            }
+            previous = new Uint8ClampedArray(pixels);
+            fullCtx.drawImage(video, 0, 0, full.width, full.height);
+            candidates.push({ time: t, diff, dataUrl: full.toDataURL("image/jpeg", 0.78) });
         }
-        return frames;
+
+        // 第 0 帧永远保留；其余按差异挑「镜头切换」，最后均匀补齐到 maxFrames。
+        const threshold = 0.06;
+        const sceneChanges = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
+        let picked = sceneChanges;
+        if (picked.length > maxFrames) {
+            picked = Array.from({ length: maxFrames }, (_, i) => sceneChanges[Math.round((i * (sceneChanges.length - 1)) / (maxFrames - 1))]);
+        } else if (picked.length < maxFrames) {
+            const extra = Array.from({ length: maxFrames - picked.length }, (_, i) => candidates[Math.min(candidates.length - 1, Math.round(((i + 1) * (candidates.length - 1)) / (maxFrames - picked.length + 1)))]);
+            picked = [...picked, ...extra];
+        }
+        const unique = Array.from(new Map(picked.map((item) => [item.time, item])).values()).sort((a, b) => a.time - b.time);
+
+        return {
+            frames: unique.map((item) => ({ time: item.time, dataUrl: item.dataUrl })),
+            meta: { duration, width, height, frameCount: unique.length, sceneCount: sceneChanges.length },
+        };
     } finally {
         URL.revokeObjectURL(src);
     }
 }
 
-/** 调用多模态模型把帧分析成角色/场景/物品 + 分镜。 */
-export async function analyzeVideoFrames(config: AiConfig, frames: CopyFrame[], model: string, signal?: AbortSignal): Promise<CopyAnalysis> {
-    // 每帧前面带时间点，模型才能把画面和时间对齐，分镜的 start/end 才有依据。
-    const content: unknown[] = [{ type: "text", text: ANALYSIS_PROMPT }];
+/** 把关键帧拼成宫格图（每格带序号和时间），一次请求就能让模型看到整条时间线。 */
+export async function buildFrameGrid(frames: CopyFrame[], cols = 3): Promise<string> {
+    const cellWidth = 320;
+    const cellHeight = 180;
+    const labelHeight = 18;
+    const rows = Math.ceil(frames.length / cols);
+    const canvas = document.createElement("canvas");
+    canvas.width = cellWidth * cols;
+    canvas.height = (cellHeight + labelHeight) * rows;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("浏览器不支持 canvas 拼图");
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // dataURL 的 Image 必须等 onload 才能可靠 drawImage
+    const images = await Promise.all(
+        frames.map(
+            (frame) =>
+                new Promise<HTMLImageElement>((resolve) => {
+                    const image = new Image();
+                    image.onload = () => resolve(image);
+                    image.onerror = () => resolve(image);
+                    image.src = frame.dataUrl;
+                }),
+        ),
+    );
     frames.forEach((frame, index) => {
-        content.push({ type: "text", text: `第 ${index + 1} 帧（≈${Math.round(frame.time)} 秒）：` });
-        content.push({ type: "image_url", image_url: { url: frame.dataUrl } });
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        const x = col * cellWidth;
+        const y = row * (cellHeight + labelHeight);
+        ctx.fillStyle = "#1f2937";
+        ctx.fillRect(x, y + labelHeight, cellWidth, cellHeight);
+        if (images[index]?.complete) ctx.drawImage(images[index], x, y + labelHeight, cellWidth, cellHeight);
+        ctx.fillStyle = "rgba(17,24,39,0.9)";
+        ctx.fillRect(x, y, cellWidth, labelHeight);
+        ctx.fillStyle = "#f9fafb";
+        ctx.font = "12px sans-serif";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`#${index + 1}  ${frame.time.toFixed(1)}s`, x + 6, y + labelHeight / 2);
     });
-    // 必须走 resolveModelRequestConfig：登录模式下顶层 config.apiKey 是空的，
-    // 真正可用的 key 和 baseUrl 在渠道上（和其他 relay 请求保持一致），否则会 401「无效的令牌」。
+    return canvas.toDataURL("image/jpeg", 0.82);
+}
+
+/** 调用多模态模型分析宫格图。 */
+export async function analyzeVideoGrid(config: AiConfig, gridDataUrl: string, meta: CopyVideoMeta, model: string, signal?: AbortSignal): Promise<CopyAnalysis> {
+    const content: unknown[] = [
+        { type: "text", text: analysisPrompt(meta) },
+        { type: "image_url", image_url: { url: gridDataUrl } },
+    ];
     const requestConfig = resolveModelRequestConfig(config, model);
     const response = await axios.post(
         aiTextUrl(requestConfig, "/chat/completions"),
         { model, messages: [{ role: "user", content }], max_tokens: 4000 },
-        { headers: aiTextHeaders(requestConfig), signal, timeout: 180000 },
+        { headers: aiTextHeaders(requestConfig), signal, timeout: 300000 },
     );
     const text: string = response.data?.choices?.[0]?.message?.content || "";
     const json = extractJson(text);
-    return normalizeAnalysis(json, frames);
+    return normalizeAnalysis(json);
 }
 
 function extractJson(text: string): Record<string, unknown> {
@@ -131,7 +226,7 @@ function extractJson(text: string): Record<string, unknown> {
     return JSON.parse(candidate.slice(start, end + 1));
 }
 
-function normalizeAnalysis(raw: Record<string, unknown>, frames: CopyFrame[]): CopyAnalysis {
+function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     const stamp = Date.now();
     const toItems = (value: unknown): CopyItem[] =>
         (Array.isArray(value) ? value : [])
@@ -149,8 +244,8 @@ function normalizeAnalysis(raw: Record<string, unknown>, frames: CopyFrame[]): C
                 const asList = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
                 return {
                     id: `shot-${stamp}-${index}`,
-                    start: String(record.start ?? `${Math.round(frames[index]?.time ?? index * 3)}秒`),
-                    end: String(record.end ?? `${Math.round(frames[index + 1]?.time ?? (index + 1) * 3)}秒`),
+                    start: String(record.start ?? ""),
+                    end: String(record.end ?? ""),
                     description: String(record.description ?? "").trim(),
                     roles: asList(record.roles),
                     scenes: asList(record.scenes),

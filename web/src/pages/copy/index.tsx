@@ -4,7 +4,7 @@ import { Clapperboard, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide
 import { useTranslation } from "react-i18next";
 
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { analyzeVideoFrames, extractVideoFrames, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { analyzeVideoGrid, buildFrameGrid, extractSceneFrames, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 
 const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
 /** 分析用的多模态模型：zcapi(OpenAI 渠道) 的 gpt 系列，支持图片输入。 */
@@ -64,9 +64,11 @@ export default function CopyVideoPage() {
         setAnalysis(null);
         try {
             setProgress(t("copyVideo.extracting"));
-            const frames = await extractVideoFrames(file, 6);
-            setProgress(t("copyVideo.analyzing", { count: frames.length }));
-            const result = await analyzeVideoFrames(config, frames, ANALYSIS_MODEL);
+            const { frames, meta } = await extractSceneFrames(file, 9);
+            setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
+            const grid = await buildFrameGrid(frames);
+            setProgress(t("copyVideo.analyzing"));
+            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL);
             setAnalysis(result);
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
