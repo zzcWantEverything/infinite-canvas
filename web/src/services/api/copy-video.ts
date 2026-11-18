@@ -77,7 +77,7 @@ export function aiTextHeaders(config: AiConfig) {
  * 差异超过阈值就判定为「镜头切换」，保留该时刻的高清帧；再均匀补齐到 maxFrames。
  * 相比固定间隔抽帧，关键镜头不容易漏，重复帧也不会占满额度。
  */
-export async function extractSceneFrames(file: File, maxFrames = 9, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
+export async function extractSceneFrames(file: File, maxFrames = 16, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
     const src = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.src = src;
@@ -135,17 +135,38 @@ export async function extractSceneFrames(file: File, maxFrames = 9, signal?: Abo
             candidates.push({ time: t, diff, dataUrl: full.toDataURL("image/jpeg", 0.78) });
         }
 
-        // 第 0 帧永远保留；其余按差异挑「镜头切换」，最后均匀补齐到 maxFrames。
+        // 先按差异找「镜头切换」作为场景边界，再在每个场景内均匀多抽几帧，
+        // 这样同一个场景里的动作推进也能被看到，而不是每个场景只有一张定格。
         const threshold = 0.06;
         const sceneChanges = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
-        let picked = sceneChanges;
-        if (picked.length > maxFrames) {
-            picked = Array.from({ length: maxFrames }, (_, i) => sceneChanges[Math.round((i * (sceneChanges.length - 1)) / (maxFrames - 1))]);
-        } else if (picked.length < maxFrames) {
-            const extra = Array.from({ length: maxFrames - picked.length }, (_, i) => candidates[Math.min(candidates.length - 1, Math.round(((i + 1) * (candidates.length - 1)) / (maxFrames - picked.length + 1)))]);
-            picked = [...picked, ...extra];
+        const framesPerScene = 3;
+        const picked: typeof candidates = [];
+        for (let i = 0; i < sceneChanges.length; i++) {
+            const startTime = sceneChanges[i].time;
+            const endTime = i + 1 < sceneChanges.length ? sceneChanges[i + 1].time : duration;
+            const span = Math.max(endTime - startTime, 0.01);
+            for (let j = 0; j < framesPerScene; j++) {
+                const target = startTime + (span * (j + 0.5)) / framesPerScene;
+                // 取离目标时间最近的候选帧
+                let closest = candidates[0];
+                let closestDelta = Math.abs(candidates[0].time - target);
+                for (const candidate of candidates) {
+                    const delta = Math.abs(candidate.time - target);
+                    if (delta < closestDelta) {
+                        closest = candidate;
+                        closestDelta = delta;
+                    }
+                }
+                picked.push(closest);
+            }
         }
-        const unique = Array.from(new Map(picked.map((item) => [item.time, item])).values()).sort((a, b) => a.time - b.time);
+        // 超出上限时按时间均匀抽，避免请求过大
+        let finalPicked = picked;
+        if (picked.length > maxFrames) {
+            const sorted = [...picked].sort((a, b) => a.time - b.time);
+            finalPicked = Array.from({ length: maxFrames }, (_, i) => sorted[Math.round((i * (sorted.length - 1)) / (maxFrames - 1))]);
+        }
+        const unique = Array.from(new Map(finalPicked.map((item) => [item.time, item])).values()).sort((a, b) => a.time - b.time);
 
         return {
             frames: unique.map((item) => ({ time: item.time, dataUrl: item.dataUrl })),
@@ -157,9 +178,9 @@ export async function extractSceneFrames(file: File, maxFrames = 9, signal?: Abo
 }
 
 /** 把关键帧拼成宫格图（每格带序号和时间），一次请求就能让模型看到整条时间线。 */
-export async function buildFrameGrid(frames: CopyFrame[], cols = 3): Promise<string> {
-    const cellWidth = 320;
-    const cellHeight = 180;
+export async function buildFrameGrid(frames: CopyFrame[], cols = 4): Promise<string> {
+    const cellWidth = 280;
+    const cellHeight = 158;
     const labelHeight = 18;
     const rows = Math.ceil(frames.length / cols);
     const canvas = document.createElement("canvas");
