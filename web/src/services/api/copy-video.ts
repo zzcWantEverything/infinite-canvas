@@ -29,6 +29,9 @@ export type CopyAnalysis = {
 
 export type CopyFrame = { time: number; dataUrl: string };
 
+/** 前端抽帧的硬上限：超过 10 分钟 seek 次数太多，体验不可接受。 */
+export const MAX_VIDEO_SECONDS = 600;
+
 export type CopyVideoMeta = {
     duration: number;
     width: number;
@@ -92,6 +95,7 @@ export async function extractSceneFrames(file: File, maxFrames = 16, signal?: Ab
         });
         const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
         if (!duration) throw new Error("视频时长读取失败");
+        if (duration > MAX_VIDEO_SECONDS) throw new Error(`视频不能超过 ${MAX_VIDEO_SECONDS / 60} 分钟（当前 ${(duration / 60).toFixed(1)} 分钟）`);
         const width = video.videoWidth || 0;
         const height = video.videoHeight || 0;
         if (!width || !height) throw new Error("视频分辨率读取失败");
@@ -115,7 +119,8 @@ export async function extractSceneFrames(file: File, maxFrames = 16, signal?: Ab
                 video.currentTime = Math.min(Math.max(time, 0), Math.max(0, duration - 0.05));
             });
 
-        const step = 0.4;
+        // 动态步长：短视频抓得细，长视频降采样，保证 seek 次数可控（10 分钟内最多约 600 次）
+        const step = duration <= 60 ? 0.4 : duration <= 300 ? 1 : 2;
         let previous: Uint8ClampedArray | null = null;
         const candidates: { time: number; diff: number; dataUrl: string }[] = [];
         for (let t = 0; t < duration; t += step) {
