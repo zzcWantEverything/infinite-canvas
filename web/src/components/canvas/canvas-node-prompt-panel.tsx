@@ -100,7 +100,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     <CanvasPromptLibrary onSelect={updatePrompt} />
                     {mode === "image" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                            <ModelPicker config={config} value={node.metadata?.model || config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasImageSettingsPopover
                                 config={config}
                                 placement="topLeft"
@@ -174,9 +174,13 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     // videoModel 传入 resolveModelForCapability，确保 model-picker 的 value 来自服务器编码后的模型值，
     // 而不是 defaultConfig 里的占位符（会导致 Radix Select 当前值与 serverVideoModels 列表不匹配）。
     const videoModel = node.metadata?.model && mode === "video" ? node.metadata.model : globalConfig.videoModel;
+    // 图片：节点上已经选过的服务器模型要原样保留。resolveModelForCapability 只在本地渠道里匹配，
+    // 服务器目录里的图片模型（miniKey 等）不在 config.channels 里，会被判成不可用而退回默认，
+    // 表现出来就是「选了不回显，生成还是旧模型」。
+    const imageModel = mode === "image" && node.metadata?.model ? node.metadata.model : undefined;
     return {
         ...globalConfig,
-        model: resolveModelForCapability(globalConfig, node.metadata?.model, mode),
+        model: imageModel || resolveModelForCapability(globalConfig, node.metadata?.model, mode),
         videoModel,
         reasoningEffort: node.metadata?.reasoningEffort || globalConfig.reasoningEffort || defaultConfig.reasoningEffort,
         quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
