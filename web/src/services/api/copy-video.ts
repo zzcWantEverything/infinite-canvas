@@ -11,11 +11,26 @@ export type CopyItem = {
 
 export type CopyShot = {
     id: string;
+    /** 时间码，精确到 0.1 秒 */
     start: string;
     end: string;
+    duration: string;
+    /** 景别：特写 / 近景 / 中景 / 全景 / 远景 */
+    shotSize: string;
+    /** 机位与角度 */
+    cameraAngle: string;
+    /** 镜头运动：固定 / 推 / 拉 / 摇 / 移 / 跟 / 手持 */
+    cameraMove: string;
+    /** 画面：首帧内容、人物位置朝向、手持物、前后景物件、结束动作停在何处 */
     description: string;
-    /** 这一镜头的台词/口播（来自音轨转写，可能为空） */
+    /** 表演：动作顺序、视线落点、手势、呼吸停顿、表情变化、动作落在哪个词上 */
+    performance: string;
+    /** 声音：口播/对白（人物名）、画外旁白、环境声、操作音效，含说话人与起止 */
+    sound: string;
+    /** 台词原文（来自音轨转写，没有则为空） */
     dialogue: string;
+    /** 画面文字：口播字幕 / 活动价签 / 身份条 / 招牌 / 包装，含位置与时间 */
+    onScreenText: string;
     roles: string[];
     scenes: string[];
     items: string[];
@@ -23,6 +38,8 @@ export type CopyShot = {
 
 export type CopyAnalysis = {
     title: string;
+    /** 画面比例，如 9:16 */
+    ratio: string;
     roles: CopyItem[];
     scenes: CopyItem[];
     items: CopyItem[];
@@ -43,25 +60,50 @@ export type CopyVideoMeta = {
 };
 
 function analysisPrompt(meta: CopyVideoMeta) {
-    return `你是一名专业的短视频分镜分析师。用户上传了一个视频按时间顺序拼接的宫格图（每格左上角标了序号和大致时间点），以及视频元数据：
+    return `你是一名专业的短视频逐镜拆解师，要产出一份可直接用于 AI 视频生成与剪辑复刻的逐镜脚本。
+用户会给出：视频宫格图（每格标了序号和大致时间点）、元数据、以及音轨自动转写的台词。
+
+视频元数据：
 - 时长：${meta.duration.toFixed(1)} 秒
 - 分辨率：${meta.width}x${meta.height}
-- 抽帧数：${meta.frameCount}（已按画面差异挑选关键帧，共 ${meta.sceneCount} 个场景切换）
+- 抽帧：${meta.frameCount} 格（已按画面差异挑选，共 ${meta.sceneCount} 个场景切换）
 
-请根据宫格图分析视频内容，严格返回 JSON（不要 markdown 代码块），结构如下：
+拆解规则：
+1. 按原片切点逐镜拆解：每次硬切、机位变化或明显转场都单独编号；极短的产品特写、手部动作、人物反应镜头也要保留。
+   时间码精确到 0.1 秒。跨度长时每 30 秒为一组（用 group 字段标组号，从 1 开始），最后一组按实际时长。
+   跨组镜头保留原切点和连续动作，台词只录一次。
+2. 声音区分四类：人物口播/对白（写明是谁、对镜还是对台下/对人说）、画外旁白（标明覆盖哪些镜头）、环境声、操作音效。
+   同一句跨多镜头只写一次，并注明切在第几个词。听不清写「待核对」，不要补写；说话人无法确认标「说话人待确认」。
+3. 画面里出现的数字/价签只写在画面/画面文字字段；只有实际说出的内容才进口播或旁白，两者不要混。
+4. 品牌、包装、价格、数量、原话按原片记录，不要改写或替换。
+5. 角色/场景/物品去重合并，名称简短；分镜里的名称必须与 roles/scenes/items 的 name 完全一致。
 
+严格返回 JSON（不要 markdown 代码块）：
 {
   "title": "一句话概括视频主题",
+  "ratio": "画面比例，如 9:16",
   "roles": [{ "name": "角色名", "description": "外观、服装、发型、气质等可复用于生图的描述" }],
   "scenes": [{ "name": "场景名", "description": "地点、光线、环境布置等可复用于生图的描述" }],
   "items": [{ "name": "物品名", "description": "外观、材质、颜色等可复用于生图的描述" }],
   "shots": [{
-    "start": "0.5秒", "end": "6.7秒",
-    "description": "这一镜头的画面内容、人物动作、镜头运动、景别",
+    "group": 1,
+    "start": "0.0秒",
+    "end": "2.3秒",
+    "duration": "2.3秒",
+    "shotSize": "特写/近景/中景/全景/远景",
+    "cameraAngle": "平视/俯拍/仰拍/正面/侧面/过肩等，含机位高低",
+    "cameraMove": "固定/推/拉/摇/移/跟/手持",
+    "description": "画面：第一帧是什么，人物在画面左/中/右哪个位置、身体朝哪、谁拿着什么、前景和背景有哪些物件，镜头结束时动作停在哪里",
+    "performance": "表演：具体动作及发生顺序，视线落点、手势、呼吸停顿、表情变化，哪个动作落在哪个词上",
+    "sound": "声音：🔵【人物口播／对白｜人物名】或 🟠【画外旁白｜声线归属】，以及环境声、操作音效，含说话人与起止位置",
     "dialogue": "该镜头对应的台词/口播原文（没有则为空字符串）",
-    "roles": ["该镜头出现的角色名"], "scenes": ["该镜头所在场景名"], "items": ["该镜头出现的关键物品名"]
+    "onScreenText": "画面文字：口播字幕/活动价签/人物身份条/背景招牌/产品包装，记录内容、位置与出现时间（没有则为空字符串）",
+    "roles": ["该镜头出现的角色名"],
+    "scenes": ["该镜头所在场景名"],
+    "items": ["该镜头出现的关键物品名"]
   }]
 }
+
 
 要求：
 1. 角色/场景/物品去重合并，同一对象只出现一次，名称简短。
@@ -359,12 +401,20 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
             .map((item, index) => {
                 const record = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
                 const asList = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+                const text = (key: string) => String(record[key] ?? "").trim();
                 return {
                     id: `shot-${stamp}-${index}`,
-                    start: String(record.start ?? ""),
-                    end: String(record.end ?? ""),
-                    description: String(record.description ?? "").trim(),
-                    dialogue: String(record.dialogue ?? "").trim(),
+                    start: text("start"),
+                    end: text("end"),
+                    duration: text("duration"),
+                    shotSize: text("shotSize"),
+                    cameraAngle: text("cameraAngle"),
+                    cameraMove: text("cameraMove"),
+                    description: text("description"),
+                    performance: text("performance"),
+                    sound: text("sound"),
+                    dialogue: text("dialogue"),
+                    onScreenText: text("onScreenText"),
                     roles: asList(record.roles),
                     scenes: asList(record.scenes),
                     items: asList(record.items),
@@ -373,6 +423,7 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
             .filter((shot) => shot.description || shot.roles.length);
     return {
         title: String(raw.title ?? "").trim() || "爆款转绘",
+        ratio: String(raw.ratio ?? "").trim(),
         roles: toItems(raw.roles),
         scenes: toItems(raw.scenes),
         items: toItems(raw.items),

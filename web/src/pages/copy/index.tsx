@@ -194,6 +194,7 @@ export default function CopyVideoPage() {
                         <div className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
                             <div className="text-base font-semibold text-stone-900 dark:text-stone-100">{analysis.title}</div>
                             <div className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+                                {analysis.ratio ? <span className="mr-2 rounded bg-stone-100 px-1.5 py-0.5 dark:bg-stone-800">{analysis.ratio}</span> : null}
                                 {t("copyVideo.summary", { roles: analysis.roles.length, scenes: analysis.scenes.length, items: analysis.items.length, shots: analysis.shots.length })}
                             </div>
                         </div>
@@ -239,7 +240,15 @@ export default function CopyVideoPage() {
                                             <Input size="small" className="!w-24" value={shot.end} onChange={(event) => updateShot(shot.id, { end: event.target.value })} />
                                             <Button size="small" type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeShot(shot.id)} />
                                         </div>
-                                        <Input.TextArea value={shot.description} onChange={(event) => updateShot(shot.id, { description: event.target.value })} rows={2} placeholder={t("copyVideo.shotDescPlaceholder")} />
+                                        <div className="flex flex-wrap gap-1 text-[11px] text-stone-500 dark:text-stone-400">
+                                            {shot.shotSize ? <span className="rounded bg-stone-100 px-1.5 py-0.5 dark:bg-stone-800">{shot.shotSize}</span> : null}
+                                            {shot.cameraAngle ? <span className="rounded bg-stone-100 px-1.5 py-0.5 dark:bg-stone-800">{shot.cameraAngle}</span> : null}
+                                            {shot.cameraMove ? <span className="rounded bg-stone-100 px-1.5 py-0.5 dark:bg-stone-800">{shot.cameraMove}</span> : null}
+                                            {shot.duration ? <span className="rounded bg-stone-100 px-1.5 py-0.5 dark:bg-stone-800">{shot.duration}</span> : null}
+                                        </div>
+                                        <Input.TextArea value={shot.description} onChange={(event) => updateShot(shot.id, { description: event.target.value })} rows={3} placeholder={t("copyVideo.shotDescPlaceholder")} />
+                                        <Input.TextArea value={shot.performance} onChange={(event) => updateShot(shot.id, { performance: event.target.value })} rows={2} placeholder={t("copyVideo.performancePlaceholder")} className="!text-xs" />
+                                        <Input.TextArea value={shot.sound} onChange={(event) => updateShot(shot.id, { sound: event.target.value })} rows={2} placeholder={t("copyVideo.soundPlaceholder")} className="!text-xs" />
                                         <Input.TextArea
                                             value={shot.dialogue}
                                             onChange={(event) => updateShot(shot.id, { dialogue: event.target.value })}
@@ -247,6 +256,7 @@ export default function CopyVideoPage() {
                                             placeholder={t("copyVideo.dialoguePlaceholder")}
                                             className="!text-xs"
                                         />
+                                        <Input.TextArea value={shot.onScreenText} onChange={(event) => updateShot(shot.id, { onScreenText: event.target.value })} rows={1} placeholder={t("copyVideo.onScreenTextPlaceholder")} className="!text-xs" />
                                         <div className="flex flex-wrap gap-1">
                                             {[...shot.roles, ...shot.scenes, ...shot.items].map((tag) => (
                                                 <span key={tag} className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-300">
