@@ -1,4 +1,4 @@
-import { FileText, Image as ImageIcon, Images, Maximize2, Video } from "lucide-react";
+import { Clapperboard, FileText, Image as ImageIcon, Images, Maximize2, Video } from "lucide-react";
 
 export const navigationTools = [
     {
@@ -8,6 +8,10 @@ export const navigationTools = [
     {
         slug: "video",
         icon: Video,
+    },
+    {
+        slug: "copy",
+        icon: Clapperboard,
     },
     {
         slug: "canvas",
