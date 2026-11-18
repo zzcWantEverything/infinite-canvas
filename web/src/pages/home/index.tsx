@@ -1,55 +1,25 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { App, Button, Image, Input } from "antd";
-import { BookOpen, Image as ImageIcon, Sparkles, Video, Wand2 } from "lucide-react";
+import { useRef, useState, type KeyboardEvent } from "react";
+import { Button, Input } from "antd";
+import { BookOpen, Image as ImageIcon, Sparkles, Video } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { fetchPrompts, type Prompt } from "@/services/api/prompts";
 import { cn } from "@/lib/utils";
-import i18n from "@/i18n";
 
 type CreationMode = "image" | "video";
 
 /** 即梦式首页：上方是唯一的创作入口，下面是瀑布流灵感墙。 */
 export default function IndexPage() {
-    const { message } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
     const promptRef = useRef<HTMLDivElement>(null);
     const [prompt, setPrompt] = useState("");
     const [mode, setMode] = useState<CreationMode>("image");
-    const [showcase, setShowcase] = useState<Prompt[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [previewIndex, setPreviewIndex] = useState(0);
-    const [previewOpen, setPreviewOpen] = useState(false);
 
-    useEffect(() => {
-        let cancelled = false;
-        // 提示词源都在 GitHub 上，网络不通时可能要等很久；骨架最多显示 8 秒就退回空态，避免一直转圈。
-        const timer = window.setTimeout(() => setLoading(false), 8000);
-        void fetchPrompts({ pageSize: 16 })
-            .then((data) => {
-                if (!cancelled) setShowcase(data.items);
-            })
-            .catch((error) => message.error(error instanceof Error ? error.message : i18n.t("home.promptError")))
-            .finally(() => {
-                window.clearTimeout(timer);
-                if (!cancelled) setLoading(false);
-            });
-        return () => {
-            cancelled = true;
-            window.clearTimeout(timer);
-        };
-    }, [message]);
 
     const submit = () => {
         const text = prompt.trim();
         navigate(text ? `/${mode}?prompt=${encodeURIComponent(text)}` : `/${mode}`);
-    };
-
-    const usePrompt = (text: string) => {
-        setPrompt(text);
-        promptRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     };
 
     const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -124,80 +94,8 @@ export default function IndexPage() {
                     </div>
                 </div>
 
-                <section className="mt-14">
-                    <div className="mb-4 flex items-end justify-between gap-4">
-                        <div>
-                            <h2 className="text-lg font-semibold text-stone-950 sm:text-xl dark:text-stone-50">{t("home.inspiration")}</h2>
-                            <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">{t("home.inspirationSubtitle")}</p>
-                        </div>
-                        <Button type="text" size="small" onClick={() => navigate("/prompts")} className="shrink-0 !text-stone-500 dark:!text-stone-400">
-                            {t("home.viewAll")}
-                        </Button>
-                    </div>
-
-                    {loading ? (
-                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-                            {Array.from({ length: 8 }).map((_, index) => (
-                                <div key={index} className={cn("animate-pulse rounded-2xl bg-stone-200/70 dark:bg-stone-800", index % 3 === 0 ? "h-44" : "h-32")} />
-                            ))}
-                        </div>
-                    ) : (
-                        <div className="columns-2 gap-3 sm:columns-3 xl:columns-4">
-                            {showcase.map((item, index) => (
-                                <div key={item.id} className="group relative mb-3 break-inside-avoid overflow-hidden rounded-2xl bg-stone-200/60 dark:bg-stone-800">
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setPreviewIndex(index);
-                                            setPreviewOpen(true);
-                                        }}
-                                        className="block w-full cursor-zoom-in"
-                                        aria-label={item.title}
-                                    >
-                                        <img src={item.coverUrl} alt={item.title} loading="lazy" className="w-full object-cover transition duration-500 group-hover:scale-[1.02]" />
-                                    </button>
-                                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/65 via-black/0 to-black/0 opacity-0 transition group-hover:opacity-100" />
-                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 translate-y-1.5 p-3 opacity-0 transition duration-200 group-hover:translate-y-0 group-hover:opacity-100">
-                                        <p className="line-clamp-2 text-xs leading-5 text-white/90">{item.title}</p>
-                                        <div className="mt-2 flex items-center justify-between gap-2">
-                                            <div className="flex min-w-0 flex-wrap gap-1">
-                                                {item.tags.slice(0, 2).map((tag) => (
-                                                    <span key={tag} className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] leading-4 text-white backdrop-blur">
-                                                        {tag}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => usePrompt(item.prompt || item.title)}
-                                                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-white/90"
-                                            >
-                                                <Wand2 className="size-3" />
-                                                {t("home.usePrompt")}
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-
-                    {!loading && !showcase.length ? (
-                        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-stone-200 px-6 py-14 text-center dark:border-stone-800">
-                            <p className="text-sm font-medium text-stone-600 dark:text-stone-300">{t("home.emptyInspiration")}</p>
-                            <p className="max-w-md text-xs leading-5 text-stone-400 dark:text-stone-500">{t("home.emptyInspirationHint")}</p>
-                        </div>
-                    ) : null}
-                </section>
             </div>
 
-            <Image.PreviewGroup preview={{ open: previewOpen, current: previewIndex, onOpenChange: setPreviewOpen, onChange: setPreviewIndex }}>
-                <div className="hidden">
-                    {showcase.map((item) => (
-                        <Image key={item.id} src={item.coverUrl} alt={item.title} />
-                    ))}
-                </div>
-            </Image.PreviewGroup>
         </main>
     );
 }
