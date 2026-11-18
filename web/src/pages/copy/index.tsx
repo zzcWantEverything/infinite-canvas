@@ -64,7 +64,7 @@ export default function CopyVideoPage() {
         setAnalysis(null);
         try {
             setProgress(t("copyVideo.extracting"));
-            const frames = await extractVideoFrames(file, 12);
+            const frames = await extractVideoFrames(file, 6);
             setProgress(t("copyVideo.analyzing", { count: frames.length }));
             const result = await analyzeVideoFrames(config, frames, ANALYSIS_MODEL);
             setAnalysis(result);

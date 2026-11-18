@@ -59,7 +59,7 @@ export function aiTextHeaders(config: AiConfig) {
 }
 
 /** 浏览器端抽帧：在视频上按等间隔取 N 帧，缩到 1280 长边，返回 JPEG dataURL。 */
-export async function extractVideoFrames(file: File, count = 12, signal?: AbortSignal): Promise<CopyFrame[]> {
+export async function extractVideoFrames(file: File, count = 6, signal?: AbortSignal): Promise<CopyFrame[]> {
     const src = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.src = src;
@@ -74,7 +74,7 @@ export async function extractVideoFrames(file: File, count = 12, signal?: AbortS
         });
         const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
         if (!duration) throw new Error("视频时长读取失败");
-        const maxEdge = 1280;
+        const maxEdge = 800;
         const scale = Math.min(1, maxEdge / Math.max(video.videoWidth || maxEdge, video.videoHeight || maxEdge));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round((video.videoWidth || maxEdge) * scale));

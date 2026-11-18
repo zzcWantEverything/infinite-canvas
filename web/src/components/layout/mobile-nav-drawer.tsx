@@ -29,7 +29,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDraw
                     <Compass className="size-5" />
                     <span>{t("navigation.home")}</span>
                 </Link>
-                {navigationTools.map((tool) => {
+                {navigationTools.filter((tool) => import.meta.env.DEV || tool.slug !== "copy").map((tool) => {
                     const Icon = tool.icon;
                     return (
                         <Link key={tool.slug} to={`/${tool.slug}`} onClick={onClose} className={itemClass(tool.slug === activeToolSlug)}>
