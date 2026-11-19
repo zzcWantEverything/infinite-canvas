@@ -28,24 +28,26 @@ export default function ProfilePage() {
     const copyText = useCopyText();
 
     const token = session?.token ?? "";
+    // effect 只依赖「有没有登录」：token 每次续期都会换新，挂进依赖会让本页在后台
+    // 反复重拉 /api/user/self，叠加 UsageLedger 与 ModelPicker 形成请求风暴。
+    const hasSession = Boolean(token);
 
     const fetchUser = useCallback(async () => {
-        if (!token) return;
+        if (!useUserStore.getState().session?.token) return;
         try {
             await refreshUser();
         } catch {
             // 401 由 http 层统一处理；网络异常时保留上一次的金额，不清空页面。
         }
-    }, [token, refreshUser]);
+    }, [refreshUser]);
 
     useEffect(() => {
         void fetchUser();
-        if (token && SHOW_AFFILIATE_PROGRAM) {
-            fetchAffCode(FIXED_BASE_URL, token)
-                .then(setAffCode)
-                .catch(reportApiError);
+        if (hasSession && SHOW_AFFILIATE_PROGRAM) {
+            const live = useUserStore.getState().session;
+            if (live?.token) fetchAffCode(FIXED_BASE_URL, live.token).then(setAffCode).catch(reportApiError);
         }
-    }, [token, fetchUser]);
+    }, [hasSession, fetchUser]);
 
     async function handleRedeem() {
         if (!redeemInput.trim()) {

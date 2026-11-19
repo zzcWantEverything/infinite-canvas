@@ -36,18 +36,21 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     // /api/user/models 使用 UserAuth（session token），apiKey 是渠道凭据，两者不互通。
     // 图片和视频都走这条路，否则本地配置里只写了一个模型时，下拉里就只见得到那一个。
     const [serverModels, setServerModels] = useState<string[]>([]);
+    // 依赖里不放 token：access token 每次续期都会换新，挂上去会让下拉在后台反复重拉目录。
+    const hasToken = Boolean(session?.token);
     useEffect(() => {
-        if (!capability || !session?.baseUrl || !session?.token) return;
-        const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, session.baseUrl)) ?? config.channels[0];
+        const live = useUserStore.getState().session;
+        if (!capability || !live?.baseUrl || !live?.token) return;
+        const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, live.baseUrl)) ?? config.channels[0];
         const channelId = matchingChannel?.id ?? "default";
-        fetchUserModels(session.baseUrl, session.token)
+        fetchUserModels(live.baseUrl, live.token)
             .then((models) => {
                 if (!models.length) return;
                 setServerModels(models.map((m) => encodeChannelModel(channelId, m)));
             })
             .catch(reportApiError);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [capability, session?.baseUrl, session?.token]);
+    }, [capability, session?.baseUrl, hasToken]);
 
     const configOptions = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
 

@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import { fetchUsageLogs, USAGE_LOG_PAGE_SIZE, type UsageLog, type UsageLogType } from "@/services/api/logs";
 import { fetchPricingSnapshot } from "@/services/api/pricing";
 import { catalogVariant } from "@/services/api/model-catalog";
+import { useUserStore } from "@/stores/use-user-store";
 import { quotaToYuan, yuanToQuota } from "@/lib/quota";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +69,7 @@ function resolveQuota(item: UsageLog): number {
 export function UsageLedger({ baseUrl, token }: { baseUrl: string; token: string }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const hasToken = Boolean(token);
     const [filter, setFilter] = useState<LedgerFilter>("all");
     const [items, setItems] = useState<UsageLog[]>([]);
     const [total, setTotal] = useState(0);
@@ -91,10 +93,13 @@ export function UsageLedger({ baseUrl, token }: { baseUrl: string; token: string
     }, [baseUrl]);
 
     useEffect(() => {
-        if (!token) return;
+        // 依赖只放「有没有登录」，token 本身从 store 现取：access token 每次续期都会换新，
+        // 挂进依赖会让流水在后台被反复重拉。
+        const live = useUserStore.getState().session;
+        if (!hasToken || !live?.token) return;
         let alive = true;
         setLoading(true);
-        fetchUsageLogs(baseUrl, token, { page: 1, pageSize: USAGE_LOG_PAGE_SIZE, type: filter === "all" ? undefined : filter })
+        fetchUsageLogs(baseUrl, live.token, { page: 1, pageSize: USAGE_LOG_PAGE_SIZE, type: filter === "all" ? undefined : filter })
             .then((data) => {
                 if (!alive) return;
                 setItems(data.items);
@@ -110,7 +115,7 @@ export function UsageLedger({ baseUrl, token }: { baseUrl: string; token: string
         return () => {
             alive = false;
         };
-    }, [baseUrl, token, filter, message, t]);
+    }, [baseUrl, hasToken, filter, message, t]);
 
     const loadMore = async () => {
         setLoadingMore(true);

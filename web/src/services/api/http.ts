@@ -188,6 +188,9 @@ axios.interceptors.response.use(
                     applyAuthHeader(config, token);
                     return axios.request(config);
                 }
+                // 续期没拿到 token：真正失效由 session.ts 在 401/403 时清会话；
+                // 429（限流）或网络问题不能把人踢到登录页，否则用户会看到「莫名被登出」。
+                return Promise.reject(apiError);
             }
             unauthorizedHandler?.();
         } else if (apiError.status === 401 && axios.isAxiosError(error) && error.config?.requiresAuth) {
