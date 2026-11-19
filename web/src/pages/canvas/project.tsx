@@ -218,7 +218,9 @@ function applyGeneratedVideo(item: CanvasNodeData, video: UploadedFile, extra: C
         width: videoSize.width,
         height: videoSize.height,
         position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
-        metadata: { ...item.metadata, ...videoMetadata(video), ...extra },
+        // 拿到成品就把任务标记清掉：留着会让刷新后的节点被当成「还有后台任务」，
+        // 工具栏一直显示「查询进度」而不是「重新生成」。
+        metadata: { ...item.metadata, videoTaskId: undefined, videoTaskProvider: undefined, mediaPending: undefined, ...videoMetadata(video), ...extra },
     };
 }
 
@@ -396,7 +398,9 @@ function InfiniteCanvasPage() {
     const completeVideoNodeTask = useCallback(
         async (nodeId: string, config: Parameters<typeof buildGenerationConfig>[0], prompt: string, images: Parameters<typeof createVideoGenerationTask>[2], signal: AbortSignal, extra: CanvasNodeData["metadata"] = {}, videos: ReferenceVideo[] = [], audios: ReferenceAudio[] = []) => {
             const task = await createVideoGenerationTask(config, prompt, images, { signal, videos, audios });
-            const taskProvider = task.provider === "plugin" ? null : task.provider;
+            // 所有 provider 都要落 taskId：plugin 的任务结果只在内存里（刷新即失效），
+            // 但记下来节点才知道「这里有个后台任务」，不会在刷新后被当成从未生成过而静默重发。
+            const taskProvider = task.provider;
             if (taskProvider) {
                 setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, videoTaskId: task.id, videoTaskProvider: taskProvider, model: config.model } } : item)));
             }
@@ -2500,6 +2504,13 @@ function InfiniteCanvasPage() {
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            // 后台还有视频任务在跑时，再点「生成」等于重新提交：上游会多一个任务、再扣一次费，
+            // 而旧任务还在排队（实测排了 2~7 小时）。这里改成查进度，
+            // 真正的重新生成要等任务失败/失效后，由工具栏的「重新生成」显式触发。
+            if (sourceNode && hasResumableVideoTask(sourceNode)) {
+                await queryVideoNodeTask(sourceNode);
+                return;
+            }
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
@@ -2938,7 +2949,7 @@ function InfiniteCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [completeVideoNodeTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+        [completeVideoNodeTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, queryVideoNodeTask, startGenerationRequest, t],
     );
     useEffect(() => {
         generateNodeRef.current = handleGenerateNode;
@@ -3281,6 +3292,10 @@ function InfiniteCanvasPage() {
                     onConfigChange={handleConfigNodeChange}
                     onGenerate={handleGenerateNode}
                     onStop={confirmStopGeneration}
+                    onQueryTask={(nodeId) => {
+                        const target = nodesRef.current.find((item) => item.id === nodeId);
+                        if (target) void queryVideoNodeTask(target);
+                    }}
                     onDisconnectReference={disconnectNodeReference}
                     onStartReferenceSelection={startNodeReferenceSelection}
                     modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}

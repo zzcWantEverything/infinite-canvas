@@ -83,8 +83,12 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     videoTaskId?: string;
-    /** 必须存真实 provider：断线重连后要按它选回对应的查询接口（ark/qora 与 openai 不同）。 */
-    videoTaskProvider?: "openai" | "gemini" | "ark" | "qora";
+    /**
+     * 必须存真实 provider：断线重连后要按它选回对应的查询接口（ark/qora 与 openai 不同）。
+     * "plugin" 表示由节点插件跑出来的任务——它的结果只在内存里，刷新后查不到，
+     * 但记下来至少能让节点显示「任务已失效，请重新生成」，而不是被当成从没跑过。
+     */
+    videoTaskProvider?: "openai" | "gemini" | "ark" | "qora" | "plugin";
     /** 任务在上游已成功，只是视频文件没下下来（上游下载慢/网络拥堵），节点显示「生成完成、获取中」。 */
     mediaPending?: boolean;
     groupId?: string;
