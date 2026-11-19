@@ -1,6 +1,9 @@
 import axios from "axios";
 
 import { buildApiUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { requestGeneration } from "@/services/api/image";
+import { VIDEO_POLL_INTERVAL, createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo } from "@/services/api/video";
+import type { ReferenceImage } from "@/types/image";
 
 /** 爆款转绘的中间结构：角色/场景/物品 + 分镜。 */
 export type CopyItem = {
@@ -373,6 +376,36 @@ export async function transcribeAudio(baseUrl: string, sessionToken: string, wav
     const data = response.data as { success?: boolean; text?: string; message?: string };
     if (!data?.success) return "";
     return String(data.text || "").trim();
+}
+
+
+/** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。 */
+export async function generateItemImage(config: AiConfig, item: CopyItem, signal?: AbortSignal): Promise<string> {
+    const prompt = [item.name, item.description].filter(Boolean).join("，");
+    const images = await requestGeneration({ ...config, count: "1" }, prompt, { signal });
+    if (!images.length) throw new Error("生图没有返回结果");
+    return images[0].dataUrl;
+}
+
+/** 分镜 → 生成一段视频（首帧参考图可选），返回可播放的 URL。 */
+export async function generateShotVideo(
+    config: AiConfig,
+    shot: CopyShot,
+    references: ReferenceImage[] = [],
+    signal?: AbortSignal,
+): Promise<string> {
+    const prompt = [shot.description, shot.performance, shot.dialogue].filter(Boolean).join("；");
+    const task = await createVideoGenerationTask(config, prompt, references, { signal });
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const state = await pollVideoGenerationTask(config, task);
+        if (state.status === "completed") {
+            const stored = await storeGeneratedVideo(state.result);
+            return stored.url;
+        }
+        if (state.status === "failed") throw new Error(state.error || "视频生成失败");
+        await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL));
+    }
 }
 
 function extractJson(text: string): Record<string, unknown> {

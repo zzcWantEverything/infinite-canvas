@@ -4,7 +4,7 @@ import { Clapperboard, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide
 import { useTranslation } from "react-i18next";
 
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 import { useUserStore } from "@/stores/use-user-store";
 
 const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
@@ -26,6 +26,12 @@ export default function CopyVideoPage() {
     const [analyzing, setAnalyzing] = useState(false);
     const [progress, setProgress] = useState("");
     const [error, setError] = useState("");
+    // 角色/场景/物品 → 生成图；分镜 → 生成视频
+    const [itemImages, setItemImages] = useState<Record<string, string>>({});
+    const [itemStatus, setItemStatus] = useState<Record<string, string>>({});
+    const [shotVideos, setShotVideos] = useState<Record<string, string>>({});
+    const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
+    const [batchRunning, setBatchRunning] = useState<"" | "image" | "video">("");
 
     useEffect(
         () => () => {
@@ -122,6 +128,48 @@ export default function CopyVideoPage() {
         { key: "items", label: t("copyVideo.items") },
     ];
 
+    const runItemImage = async (item: CopyItem) => {
+        setItemStatus((prev) => ({ ...prev, [item.id]: "running" }));
+        try {
+            const url = await generateItemImage(config, item);
+            setItemImages((prev) => ({ ...prev, [item.id]: url }));
+            setItemStatus((prev) => ({ ...prev, [item.id]: "done" }));
+        } catch (e) {
+            setItemStatus((prev) => ({ ...prev, [item.id]: "failed" }));
+            if (!(e instanceof DOMException && e.name === "AbortError")) setError(e instanceof Error ? e.message : "生图失败");
+        }
+    };
+
+    const runShotVideo = async (shot: CopyShot) => {
+        setShotStatus((prev) => ({ ...prev, [shot.id]: "running" }));
+        try {
+            const url = await generateShotVideo(config, shot);
+            setShotVideos((prev) => ({ ...prev, [shot.id]: url }));
+            setShotStatus((prev) => ({ ...prev, [shot.id]: "done" }));
+        } catch (e) {
+            setShotStatus((prev) => ({ ...prev, [shot.id]: "failed" }));
+            if (!(e instanceof DOMException && e.name === "AbortError")) setError(e instanceof Error ? e.message : "生视频失败");
+        }
+    };
+
+    // 并发 2，避免把上游和本机同时打满
+    const runBatch = async (kind: "image" | "video") => {
+        if (!analysis || batchRunning) return;
+        setBatchRunning(kind);
+        const tasks = kind === "image" ? [...analysis.roles, ...analysis.scenes, ...analysis.items] : analysis.shots;
+        const queue = [...tasks];
+        const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
+            for (;;) {
+                const next = queue.shift();
+                if (!next) return;
+                if (kind === "image") await runItemImage(next as CopyItem);
+                else await runShotVideo(next as CopyShot);
+            }
+        });
+        await Promise.all(workers);
+        setBatchRunning("");
+    };
+
     return (
         <main className="thin-scrollbar h-full overflow-y-auto bg-transparent">
             <div className="mx-auto w-full max-w-[1180px] px-5 pb-20 pt-6 sm:px-8 sm:pt-10">
@@ -201,11 +249,16 @@ export default function CopyVideoPage() {
 
                         {sections.map((section) => (
                             <section key={section.key} className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
-                                <div className="mb-3 flex items-center justify-between">
+                                <div className="mb-3 flex items-center justify-between gap-2">
                                     <div className="text-sm font-semibold text-stone-800 dark:text-stone-200">{section.label}</div>
-                                    <Button size="small" icon={<Plus className="size-3.5" />} onClick={() => addItem(section.key)}>
-                                        {t("copyVideo.add")}
-                                    </Button>
+                                    <div className="flex gap-2">
+                                        <Button size="small" icon={<Sparkles className="size-3.5" />} loading={batchRunning === "image"} disabled={Boolean(batchRunning)} onClick={() => void runBatch("image")}>
+                                            {t("copyVideo.batchImage")}
+                                        </Button>
+                                        <Button size="small" icon={<Plus className="size-3.5" />} onClick={() => addItem(section.key)}>
+                                            {t("copyVideo.add")}
+                                        </Button>
+                                    </div>
                                 </div>
                                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                                     {analysis[section.key].map((item) => (
@@ -220,6 +273,12 @@ export default function CopyVideoPage() {
                                                 rows={3}
                                                 placeholder={t("copyVideo.descPlaceholder")}
                                             />
+                                            {itemImages[item.id] ? (
+                                                <img src={itemImages[item.id]} alt={item.name} className="max-h-40 w-full rounded-lg object-cover" />
+                                            ) : null}
+                                            <Button size="small" icon={<Sparkles className="size-3.5" />} loading={itemStatus[item.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runItemImage(item)}>
+                                                {itemImages[item.id] ? t("copyVideo.regenerate") : t("copyVideo.genImage")}
+                                            </Button>
                                         </div>
                                     ))}
                                 </div>
@@ -227,7 +286,12 @@ export default function CopyVideoPage() {
                         ))}
 
                         <section className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
-                            <div className="mb-3 text-sm font-semibold text-stone-800 dark:text-stone-200">{t("copyVideo.shots")}</div>
+                            <div className="mb-3 flex items-center justify-between gap-2">
+                                <div className="text-sm font-semibold text-stone-800 dark:text-stone-200">{t("copyVideo.shots")}</div>
+                                <Button size="small" icon={<Sparkles className="size-3.5" />} loading={batchRunning === "video"} disabled={Boolean(batchRunning)} onClick={() => void runBatch("video")}>
+                                    {t("copyVideo.batchVideo")}
+                                </Button>
+                            </div>
                             <div className="flex flex-col gap-3">
                                 {analysis.shots.map((shot, index) => (
                                     <div key={shot.id} className="flex flex-col gap-2 rounded-xl border border-stone-200/70 p-3 dark:border-stone-800">
@@ -257,6 +321,10 @@ export default function CopyVideoPage() {
                                             className="!text-xs"
                                         />
                                         <Input.TextArea value={shot.onScreenText} onChange={(event) => updateShot(shot.id, { onScreenText: event.target.value })} rows={1} placeholder={t("copyVideo.onScreenTextPlaceholder")} className="!text-xs" />
+                                        {shotVideos[shot.id] ? <video src={shotVideos[shot.id]} controls className="max-h-52 w-full rounded-lg bg-black object-contain" /> : null}
+                                        <Button size="small" icon={<Sparkles className="size-3.5" />} loading={shotStatus[shot.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runShotVideo(shot)}>
+                                            {shotVideos[shot.id] ? t("copyVideo.regenerate") : t("copyVideo.genVideo")}
+                                        </Button>
                                         <div className="flex flex-wrap gap-1">
                                             {[...shot.roles, ...shot.scenes, ...shot.items].map((tag) => (
                                                 <span key={tag} className="rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-300">
