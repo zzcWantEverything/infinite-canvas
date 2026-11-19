@@ -278,21 +278,42 @@ export async function analyzeVideoGrid(config: AiConfig, gridDataUrl: string, me
     const promptText = transcript
         ? `${analysisPrompt(meta)}\n\n附：视频音轨自动转写的台词（带时间戳，可直接用于分镜的口播/台词字段，注意校正同音字）\n${transcript}`
         : analysisPrompt(meta);
-    const content: unknown[] = [
-        { type: "text", text: promptText },
-        { type: "image_url", image_url: { url: gridDataUrl } },
-    ];
+    // 走异步任务：长请求会被链路中间代理 120s 掐断，改成「提交 + 轮询」
     const requestConfig = resolveModelRequestConfig(config, model);
-    const response = await axios.post(
-        aiTextUrl(requestConfig, "/chat/completions"),
-        { model, messages: [{ role: "user", content }], max_tokens: 4000 },
-        { headers: aiTextHeaders(requestConfig), signal, timeout: 300000 },
+    const base = requestConfig.baseUrl.trim().replace(/\/+$/, "");
+    const endpoint = `${base}/api/user/copy/analyze`;
+    const submit = await axios.post(
+        endpoint,
+        { baseUrl: base, apiKey: requestConfig.apiKey, model, prompt: promptText, image: gridDataUrl },
+        { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal, timeout: 30000 },
     );
-    const text: string = response.data?.choices?.[0]?.message?.content || "";
-    const json = extractJson(text);
-    return normalizeAnalysis(json);
+    const jobId = String((submit.data as { jobId?: string })?.jobId || "");
+    if (!jobId) throw new Error("提交分析任务失败");
+    for (;;) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const poll = await axios.get(`${endpoint}/${encodeURIComponent(jobId)}`, { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal, timeout: 30000 });
+        const data = poll.data as { status?: string; content?: string; error?: string };
+        if (data.status === "done") {
+            return normalizeAnalysis(extractJson(String(data.content || "")));
+        }
+        if (data.status === "failed") throw new Error(data.error || "分析失败");
+    }
 }
 
+
+function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || "");
+            const idx = result.indexOf("base64,");
+            resolve(idx >= 0 ? result.slice(idx + 7) : result);
+        };
+        reader.onerror = () => reject(new Error("音频读取失败"));
+        reader.readAsDataURL(blob);
+    });
+}
 
 /** whisper 只吃 16kHz 单声道 PCM；这里把视频文件的音轨解出来并重采样。 */
 export async function extractAudioWav(file: File, signal?: AbortSignal): Promise<{ blob: Blob; duration: number } | null> {
@@ -302,12 +323,10 @@ export async function extractAudioWav(file: File, signal?: AbortSignal): Promise
     try {
         const buffer = await file.arrayBuffer();
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        // 浏览器直接解码容器里的音轨（MP4/AAC、WebM/Opus、MP3、WAV 等）
         const decoded = await ctx.decodeAudioData(buffer);
         if (!decoded || decoded.duration <= 0) return null;
         const targetRate = 16000;
         const frames = Math.max(1, Math.ceil(decoded.duration * targetRate));
-        // OfflineAudioContext 负责重采样 + 混到单声道
         const offline = new OfflineAudioContext(1, frames, targetRate);
         const source = offline.createBufferSource();
         source.buffer = decoded;
@@ -317,14 +336,12 @@ export async function extractAudioWav(file: File, signal?: AbortSignal): Promise
         return { blob: encodeWav(rendered.getChannelData(0), targetRate), duration: decoded.duration };
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") throw error;
-        // 浏览器不认识该音轨编码（HEVC/AC3 等），降级为「无台词」
         return null;
     } finally {
         void ctx.close();
     }
 }
 
-/** Float32 PCM → 16bit 单声道 WAV */
 function encodeWav(samples: Float32Array, sampleRate: number): Blob {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(buffer);
@@ -353,20 +370,6 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
     return new Blob([buffer], { type: "audio/wav" });
 }
 
-
-function blobToBase64(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = String(reader.result || "");
-            const idx = result.indexOf("base64,");
-            resolve(idx >= 0 ? result.slice(idx + 7) : result);
-        };
-        reader.onerror = () => reject(new Error("音频读取失败"));
-        reader.readAsDataURL(blob);
-    });
-}
-
 /** 调 new-api 的腾讯云 ASR 代理，把音轨转成台词。失败返回空串（降级为无台词）。 */
 export async function transcribeAudio(baseUrl: string, sessionToken: string, wav: Blob, signal?: AbortSignal): Promise<string> {
     const audio = await blobToBase64(wav);
@@ -377,7 +380,6 @@ export async function transcribeAudio(baseUrl: string, sessionToken: string, wav
     if (!data?.success) return "";
     return String(data.text || "").trim();
 }
-
 
 /** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。 */
 export async function generateItemImage(config: AiConfig, item: CopyItem, signal?: AbortSignal): Promise<string> {
