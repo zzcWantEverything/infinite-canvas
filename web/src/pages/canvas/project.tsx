@@ -269,6 +269,12 @@ function InfiniteCanvasPage() {
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cloudPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /**
+     * 下一轮 nodes 落定后立刻推云，不等 1.5s 防抖。
+     * 视频任务提交成功时要把 videoTaskId 尽快写进库里：如果用户在这 1.5 秒内刷新/关页，
+     * 库里没这个 id，节点就会被当成「从没生成过」，再点一次就是第二个上游任务。
+     */
+    const forceCloudPushRef = useRef(false);
     const applyingHistoryRef = useRef(false);
     const historyPausedRef = useRef(false);
     const didInitialCenterRef = useRef(false);
@@ -402,6 +408,9 @@ function InfiniteCanvasPage() {
             // 但记下来节点才知道「这里有个后台任务」，不会在刷新后被当成从未生成过而静默重发。
             const taskProvider = task.provider;
             if (taskProvider) {
+                // 拿到 taskId 的这一帧立刻推云：防抖 1.5s 里刷新页面会把这个 id 丢掉，
+                // 节点就会被当成从没生成过，再点一次等于第二个上游任务。
+                forceCloudPushRef.current = true;
                 setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, videoTaskId: task.id, videoTaskProvider: taskProvider, model: config.model } } : item)));
             }
             const video = await storeGeneratedVideo(await waitForVideoGenerationTask(config, task, { signal }));
@@ -673,8 +682,17 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!projectLoaded || historyPausedRef.current) return;
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo });
-        // 云端保存防抖 1.5s：等用户停手再推，避免每个节点拖一下都打一次接口。
+        // 视频任务刚拿到 taskId：立刻推一次云，别让 id 卡在防抖窗口里。
+        const forcePush = forceCloudPushRef.current;
+        forceCloudPushRef.current = false;
         if (cloudPushTimerRef.current) clearTimeout(cloudPushTimerRef.current);
+        if (forcePush) {
+            cloudPushTimerRef.current = null;
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (project) void pushProjectToCloud(project);
+            return;
+        }
+        // 云端保存防抖 1.5s：等用户停手再推，避免每个节点拖一下都打一次接口。
         cloudPushTimerRef.current = setTimeout(() => {
             cloudPushTimerRef.current = null;
             const project = useCanvasStore.getState().openProject(projectId);
