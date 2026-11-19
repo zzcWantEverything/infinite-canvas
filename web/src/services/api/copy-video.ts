@@ -1,7 +1,8 @@
 import axios from "axios";
 
-import { buildApiUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, type AiConfig } from "@/stores/use-config-store";
 import { requestGeneration } from "@/services/api/image";
+import { readAxiosError } from "@/services/api/http";
 import { VIDEO_POLL_INTERVAL, createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo } from "@/services/api/video";
 import type { ReferenceImage } from "@/types/image";
 
@@ -273,26 +274,31 @@ export async function buildFrameGrid(frames: CopyFrame[], cols = 4): Promise<str
     return canvas.toDataURL("image/jpeg", 0.82);
 }
 
-/** 调用多模态模型分析宫格图。 */
-export async function analyzeVideoGrid(config: AiConfig, gridDataUrl: string, meta: CopyVideoMeta, model: string, transcript = "", signal?: AbortSignal): Promise<CopyAnalysis> {
+/** 调用多模态模型分析宫格图。sessionToken 必须是后台登录态 token（不是中转 key）。 */
+export async function analyzeVideoGrid(config: AiConfig, gridDataUrl: string, meta: CopyVideoMeta, model: string, sessionToken: string, transcript = "", signal?: AbortSignal): Promise<CopyAnalysis> {
     const promptText = transcript
         ? `${analysisPrompt(meta)}\n\n附：视频音轨自动转写的台词（带时间戳，可直接用于分镜的口播/台词字段，注意校正同音字）\n${transcript}`
         : analysisPrompt(meta);
-    // 走异步任务：长请求会被链路中间代理 120s 掐断，改成「提交 + 轮询」
-    const requestConfig = resolveModelRequestConfig(config, model);
-    const base = requestConfig.baseUrl.trim().replace(/\/+$/, "");
-    const endpoint = `${base}/api/user/copy/analyze`;
-    const submit = await axios.post(
-        endpoint,
-        { baseUrl: base, apiKey: requestConfig.apiKey, model, prompt: promptText, image: gridDataUrl },
-        { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal, timeout: 30000 },
-    );
+    if (!sessionToken.trim()) throw new Error("请先登录后再分析");
+    // 走异步任务：长请求会被链路中间代理 120s 掐断，改成「提交 + 轮询」。
+    // 用同源相对路径：`/api/user/**` 挂的是 UserAuth，只认后台登录态 token；
+    // 渠道里那个中转 key（sk-...）会被判成「access token 无效」。
+    // key 和 baseUrl 都不再上传 —— 服务端按登录用户自己取令牌、地址固定本机回环，
+    // 既不让凭证出现在请求体里，也避免 baseUrl 被拿去打内网（SSRF）。
+    const endpoint = "/api/user/copy/analyze";
+    const headers = { Authorization: `Bearer ${sessionToken.trim()}` };
+    // 把后端的中文 message（如「access token 无效」）透出来，别只显示 HTTP 401。
+    const submit = await axios.post(endpoint, { model, prompt: promptText, image: gridDataUrl }, { headers, signal, timeout: 30000 }).catch((error: unknown) => {
+        throw new Error(readAxiosError(error, "提交分析任务失败"));
+    });
     const jobId = String((submit.data as { jobId?: string })?.jobId || "");
     if (!jobId) throw new Error("提交分析任务失败");
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        const poll = await axios.get(`${endpoint}/${encodeURIComponent(jobId)}`, { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal, timeout: 30000 });
+        const poll = await axios.get(`${endpoint}/${encodeURIComponent(jobId)}`, { headers, signal, timeout: 30000 }).catch((error: unknown) => {
+            throw new Error(readAxiosError(error, "查询分析进度失败"));
+        });
         const data = poll.data as { status?: string; content?: string; error?: string };
         if (data.status === "done") {
             return normalizeAnalysis(extractJson(String(data.content || "")));
@@ -396,7 +402,7 @@ export async function generateShotVideo(
     references: ReferenceImage[] = [],
     signal?: AbortSignal,
 ): Promise<string> {
-    const prompt = [shot.description, shot.performance, shot.dialogue].filter(Boolean).join("；");
+    const prompt = shotPrompt(shot);
     const task = await createVideoGenerationTask(config, prompt, references, { signal });
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -408,6 +414,17 @@ export async function generateShotVideo(
         if (state.status === "failed") throw new Error(state.error || "视频生成失败");
         await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL));
     }
+}
+
+/**
+ * 分镜 → 视频提示词。按「镜头语言 → 画面 → 表演 → 台词/画面文字」拼，
+ * 景别/机位/运动单独成句，避免和画面描述混在一起被模型忽略。
+ */
+export function shotPrompt(shot: CopyShot): string {
+    const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
+    const lines = [camera ? `镜头：${camera}` : "", shot.description ? `画面：${shot.description}` : "", shot.performance ? `表演：${shot.performance}` : "", shot.dialogue ? `台词：${shot.dialogue}` : "", shot.onScreenText ? `画面文字：${shot.onScreenText}` : ""];
+    const prompt = lines.filter(Boolean).join("\n");
+    return prompt || shot.description || "复刻原片镜头的画面与运镜";
 }
 
 function extractJson(text: string): Record<string, unknown> {

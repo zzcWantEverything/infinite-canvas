@@ -28,7 +28,7 @@ export function AppSideNav() {
 
             <nav className="hide-scrollbar flex w-full min-h-0 flex-col items-center gap-1 overflow-y-auto">
                 <SideNavItem to="/" icon={Compass} label={t("navigation.home")} active={pathname === "/"} />
-                {navigationTools.filter((tool) => import.meta.env.DEV || tool.slug !== "copy").map((tool) => (
+                {navigationTools.map((tool) => (
                     <SideNavItem key={tool.slug} to={`/${tool.slug}`} icon={tool.icon} label={t(`navigation.${tool.slug}`)} active={tool.slug === activeToolSlug} />
                 ))}
             </nav>

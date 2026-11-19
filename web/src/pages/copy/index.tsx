@@ -1,11 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input } from "antd";
-import { Clapperboard, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Clapperboard, ImagePlus, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { CopySettingsPanel, createCopyGenSettings, type CopyGenSettings } from "@/components/copy/copy-settings-panel";
+import { videoModelCapability } from "@/config/video-models";
+import { computeMediaSize, mediaRatioOptions } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 import { useUserStore } from "@/stores/use-user-store";
+import type { ReferenceImage } from "@/types/image";
 
 const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
 /** 分析用的多模态模型：zcapi(OpenAI 渠道) 的 gpt 系列，支持图片输入。 */
@@ -17,6 +21,8 @@ export default function CopyVideoPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const uploadInputRef = useRef<HTMLInputElement>(null);
+    const uploadTargetRef = useRef<string | null>(null);
     const config = useEffectiveConfig();
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
 
@@ -32,6 +38,65 @@ export default function CopyVideoPage() {
     const [shotVideos, setShotVideos] = useState<Record<string, string>>({});
     const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
     const [batchRunning, setBatchRunning] = useState<"" | "image" | "video">("");
+    // 统一参数：一套生图参数喂所有角色/场景/物品，一套生视频参数喂所有分镜。
+    const [genSettings, setGenSettings] = useState<CopyGenSettings>(() => createCopyGenSettings(config));
+
+    const patchSettings = (patch: Partial<CopyGenSettings>) => setGenSettings((prev) => ({ ...prev, ...patch }));
+
+    // 生成阶段用的配置：把面板里选的模型/比例/分辨率/时长盖到全局配置上，
+    // 这样 requestGeneration / createVideoGenerationTask 走的就是面板选择，而不是全局默认。
+    const imageConfig = useMemo(
+        () => ({
+            ...config,
+            model: genSettings.imageModel,
+            imageModel: genSettings.imageModel,
+            size: computeMediaSize(genSettings.imageScale, genSettings.imageRatio),
+            count: "1",
+        }),
+        [config, genSettings.imageModel, genSettings.imageScale, genSettings.imageRatio],
+    );
+
+    const videoConfig = useMemo(
+        () => ({
+            ...config,
+            model: genSettings.videoModel,
+            videoModel: genSettings.videoModel,
+            size: genSettings.videoRatio,
+            vquality: genSettings.videoResolution,
+            videoSeconds: genSettings.videoSeconds,
+        }),
+        [config, genSettings.videoModel, genSettings.videoRatio, genSettings.videoResolution, genSettings.videoSeconds],
+    );
+
+    /**
+     * 分镜自己的时长 → 模型支持的档位。面板选「按分镜时长」时用这个，
+     * 复刻出来的节奏才和原片一致（统一 5 秒会把快切镜头全拖成慢镜头）。
+     */
+    const shotSeconds = (shot: CopyShot) => {
+        const numeric = Number(String(shot.duration || "").replace(/[^0-9.]/g, ""));
+        let seconds = Number.isFinite(numeric) && numeric > 0 ? numeric : NaN;
+        if (!Number.isFinite(seconds)) {
+            const timecode = (value: string) => {
+                const parts = String(value || "")
+                    .trim()
+                    .split(":")
+                    .map((part) => Number(part));
+                if (parts.length < 2 || parts.some((part) => !Number.isFinite(part))) return NaN;
+                return parts.reduce((acc, part) => acc * 60 + part, 0);
+            };
+            const start = timecode(shot.start);
+            const end = timecode(shot.end);
+            seconds = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : NaN;
+        }
+        if (!Number.isFinite(seconds)) return genSettings.videoSeconds === "auto" ? "5" : genSettings.videoSeconds;
+        const capability = videoModelCapability(genSettings.videoModel);
+        const { min, max, step } = capability?.seconds ?? { min: 4, max: 30, step: 1 };
+        const stride = step && step > 0 ? step : 1;
+        const snapped = Math.round(seconds / stride) * stride;
+        return String(Math.min(max, Math.max(min, snapped)));
+    };
+
+    const videoConfigFor = (shot: CopyShot) => (genSettings.videoSeconds === "auto" ? { ...videoConfig, videoSeconds: shotSeconds(shot) } : videoConfig);
 
     useEffect(
         () => () => {
@@ -66,6 +131,13 @@ export default function CopyVideoPage() {
             message.warning(t("copyVideo.needGpt"));
             return;
         }
+        // /api/user/copy/* 认的是后台登录态 token，不是渠道里的中转 key；
+        // 没登录的话这里直接拦住，别等抽完帧才报「access token 无效」。
+        const sessionToken = useUserStore.getState().session?.token || "";
+        if (!sessionToken) {
+            message.warning(t("copyVideo.needLogin"));
+            return;
+        }
         setAnalyzing(true);
         setError("");
         setAnalysis(null);
@@ -77,18 +149,18 @@ export default function CopyVideoPage() {
             // 音轨转写（失败降级为无台词，不阻塞分析）
             setProgress(t("copyVideo.transcribing"));
             let transcript = "";
-            const session = useUserStore.getState().session;
-            if (session?.token) {
-                try {
-                    const audio = await extractAudioWav(file);
-                    if (audio) transcript = await transcribeAudio(config.baseUrl, session.token, audio.blob);
-                } catch {
-                    transcript = "";
-                }
+            try {
+                const audio = await extractAudioWav(file);
+                if (audio) transcript = await transcribeAudio(config.baseUrl, sessionToken, audio.blob);
+            } catch {
+                transcript = "";
             }
             setProgress(t("copyVideo.analyzing"));
-            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, transcript);
+            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, sessionToken, transcript);
             setAnalysis(result);
+            // 分析出的片子比例直接作为生图/生视频的默认比例，避免竖屏素材被生成成横屏。
+            const ratio = (result.ratio || "").trim();
+            if (mediaRatioOptions.some((item) => item.value === ratio)) patchSettings({ imageRatio: ratio, videoRatio: ratio });
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
             if (e instanceof DOMException && e.name === "AbortError") return;
@@ -122,16 +194,98 @@ export default function CopyVideoPage() {
         setAnalysis((prev) => (prev ? { ...prev, shots: prev.shots.filter((shot) => shot.id !== id) } : prev));
     };
 
+    const addShot = () => {
+        setAnalysis((prev) =>
+            prev
+                ? {
+                      ...prev,
+                      shots: [
+                          ...prev.shots,
+                          {
+                              id: `shot-${Date.now()}`,
+                              start: "",
+                              end: "",
+                              duration: "",
+                              shotSize: "",
+                              cameraAngle: "",
+                              cameraMove: "",
+                              description: "",
+                              performance: "",
+                              sound: "",
+                              dialogue: "",
+                              onScreenText: "",
+                              roles: [],
+                              scenes: [],
+                              items: [],
+                          },
+                      ],
+                  }
+                : prev,
+        );
+    };
+
+    // 分镜顺序就是成片顺序，允许上下调整。
+    const moveShot = (id: string, delta: -1 | 1) => {
+        setAnalysis((prev) => {
+            if (!prev) return prev;
+            const index = prev.shots.findIndex((shot) => shot.id === id);
+            const target = index + delta;
+            if (index < 0 || target < 0 || target >= prev.shots.length) return prev;
+            const shots = [...prev.shots];
+            [shots[index], shots[target]] = [shots[target], shots[index]];
+            return { ...prev, shots };
+        });
+    };
+
+    // 自己上传参考图：覆盖 AI 生成的那张，后续生视频会用它当参考。
+    const pickItemImage = (id: string) => {
+        uploadTargetRef.current = id;
+        uploadInputRef.current?.click();
+    };
+
+    const applyUploadedImage = (file: File | null) => {
+        const id = uploadTargetRef.current;
+        uploadTargetRef.current = null;
+        if (!file || !id) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUrl = String(reader.result || "");
+            if (dataUrl) setItemImages((prev) => ({ ...prev, [id]: dataUrl }));
+        };
+        reader.readAsDataURL(file);
+    };
+
     const sections: { key: Section; label: string }[] = [
         { key: "roles", label: t("copyVideo.roles") },
         { key: "scenes", label: t("copyVideo.scenes") },
         { key: "items", label: t("copyVideo.items") },
     ];
 
+    /**
+     * 分镜涉及的角色/场景图作为参考图传给视频模型，保证人物外观和场景一致性。
+     * 分镜里没打标签时（模型漏写），退回用已生成的场景图 + 角色图各取前几张。
+     */
+    const referencesForShot = (shot: CopyShot): ReferenceImage[] => {
+        if (!analysis) return [];
+        const collect = (names: string[], items: CopyItem[]) => {
+            const refs: ReferenceImage[] = [];
+            for (const name of names) {
+                const item = items.find((entry) => entry.name === name);
+                const url = item ? itemImages[item.id] : undefined;
+                if (item && url) refs.push({ id: item.id, name: item.name, type: "image/png", dataUrl: url });
+            }
+            return refs;
+        };
+        const named = [...collect(shot.roles, analysis.roles), ...collect(shot.scenes, analysis.scenes), ...collect(shot.items, analysis.items)];
+        if (named.length) return named.slice(0, 4);
+        const generated = (items: CopyItem[]) => items.filter((item) => itemImages[item.id]).map((item) => ({ id: item.id, name: item.name, type: "image/png", dataUrl: itemImages[item.id] }));
+        return [...generated(analysis.scenes), ...generated(analysis.roles)].slice(0, 2);
+    };
+
     const runItemImage = async (item: CopyItem) => {
         setItemStatus((prev) => ({ ...prev, [item.id]: "running" }));
         try {
-            const url = await generateItemImage(config, item);
+            const url = await generateItemImage(imageConfig, item);
             setItemImages((prev) => ({ ...prev, [item.id]: url }));
             setItemStatus((prev) => ({ ...prev, [item.id]: "done" }));
         } catch (e) {
@@ -143,7 +297,7 @@ export default function CopyVideoPage() {
     const runShotVideo = async (shot: CopyShot) => {
         setShotStatus((prev) => ({ ...prev, [shot.id]: "running" }));
         try {
-            const url = await generateShotVideo(config, shot);
+            const url = await generateShotVideo(videoConfigFor(shot), shot, referencesForShot(shot));
             setShotVideos((prev) => ({ ...prev, [shot.id]: url }));
             setShotStatus((prev) => ({ ...prev, [shot.id]: "done" }));
         } catch (e) {
@@ -247,6 +401,8 @@ export default function CopyVideoPage() {
                             </div>
                         </div>
 
+                        <CopySettingsPanel config={config} value={genSettings} onChange={patchSettings} disabled={Boolean(batchRunning)} />
+
                         {sections.map((section) => (
                             <section key={section.key} className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
                                 <div className="mb-3 flex items-center justify-between gap-2">
@@ -276,9 +432,12 @@ export default function CopyVideoPage() {
                                             {itemImages[item.id] ? (
                                                 <img src={itemImages[item.id]} alt={item.name} className="max-h-40 w-full rounded-lg object-cover" />
                                             ) : null}
-                                            <Button size="small" icon={<Sparkles className="size-3.5" />} loading={itemStatus[item.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runItemImage(item)}>
-                                                {itemImages[item.id] ? t("copyVideo.regenerate") : t("copyVideo.genImage")}
-                                            </Button>
+                                            <div className="flex gap-2">
+                                                <Button size="small" className="flex-1" icon={<Sparkles className="size-3.5" />} loading={itemStatus[item.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runItemImage(item)}>
+                                                    {itemImages[item.id] ? t("copyVideo.regenerate") : t("copyVideo.genImage")}
+                                                </Button>
+                                                <Button size="small" icon={<ImagePlus className="size-3.5" />} title={t("copyVideo.uploadImage")} disabled={Boolean(batchRunning)} onClick={() => pickItemImage(item.id)} />
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
@@ -286,12 +445,17 @@ export default function CopyVideoPage() {
                         ))}
 
                         <section className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
-                            <div className="mb-3 flex items-center justify-between gap-2">
-                                <div className="text-sm font-semibold text-stone-800 dark:text-stone-200">{t("copyVideo.shots")}</div>
-                                <Button size="small" icon={<Sparkles className="size-3.5" />} loading={batchRunning === "video"} disabled={Boolean(batchRunning)} onClick={() => void runBatch("video")}>
-                                    {t("copyVideo.batchVideo")}
-                                </Button>
-                            </div>
+                                <div className="mb-3 flex items-center justify-between gap-2">
+                                    <div className="text-sm font-semibold text-stone-800 dark:text-stone-200">{t("copyVideo.shots")}</div>
+                                    <div className="flex gap-2">
+                                        <Button size="small" icon={<Sparkles className="size-3.5" />} loading={batchRunning === "video"} disabled={Boolean(batchRunning)} onClick={() => void runBatch("video")}>
+                                            {t("copyVideo.batchVideo")}
+                                        </Button>
+                                        <Button size="small" icon={<Plus className="size-3.5" />} onClick={addShot} disabled={Boolean(batchRunning)}>
+                                            {t("copyVideo.add")}
+                                        </Button>
+                                    </div>
+                                </div>
                             <div className="flex flex-col gap-3">
                                 {analysis.shots.map((shot, index) => (
                                     <div key={shot.id} className="flex flex-col gap-2 rounded-xl border border-stone-200/70 p-3 dark:border-stone-800">
@@ -302,6 +466,8 @@ export default function CopyVideoPage() {
                                             <Input size="small" className="!w-24" value={shot.start} onChange={(event) => updateShot(shot.id, { start: event.target.value })} />
                                             <span className="text-xs text-stone-400">→</span>
                                             <Input size="small" className="!w-24" value={shot.end} onChange={(event) => updateShot(shot.id, { end: event.target.value })} />
+                                            <Button size="small" type="text" icon={<ChevronUp className="size-3.5" />} disabled={index === 0} onClick={() => moveShot(shot.id, -1)} />
+                                            <Button size="small" type="text" icon={<ChevronDown className="size-3.5" />} disabled={index === analysis.shots.length - 1} onClick={() => moveShot(shot.id, 1)} />
                                             <Button size="small" type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeShot(shot.id)} />
                                         </div>
                                         <div className="flex flex-wrap gap-1 text-[11px] text-stone-500 dark:text-stone-400">
@@ -332,6 +498,7 @@ export default function CopyVideoPage() {
                                                 </span>
                                             ))}
                                         </div>
+                                        <div className="text-[11px] text-stone-400 dark:text-stone-500">{t("copyVideo.refHint", { n: referencesForShot(shot).length })}</div>
                                     </div>
                                 ))}
                             </div>
@@ -349,6 +516,16 @@ export default function CopyVideoPage() {
                 className="hidden"
                 onChange={(event) => {
                     pickFile(event.target.files?.[0] ?? null);
+                    event.target.value = "";
+                }}
+            />
+            <input
+                ref={uploadInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => {
+                    applyUploadedImage(event.target.files?.[0] ?? null);
                     event.target.value = "";
                 }}
             />
