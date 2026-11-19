@@ -427,6 +427,14 @@ export default {
         refHint: "参考图 {{n}} 张",
         uploadImage: "上传图片",
         generateHint: "分镜生视频会自动带上该镜涉及的角色/场景图作为参考，画面更一致；没生成参考图时会退回已生成的图。",
+        history: "历史记录",
+        historyEmpty: "还没有历史记录。分析完成后会自动保存一份，随时可以回来继续改。",
+        historyShots: "{{count}} 个分镜",
+        historyDeleteConfirm: "删除这条历史记录？已生成的图和视频不会删除。",
+        historyLoadFailed: "读取历史记录失败",
+        historyDeleteFailed: "删除历史记录失败",
+        historyBroken: "这条记录内容不完整，无法载入",
+        untitled: "未命名",
     },
 
     topNav: {

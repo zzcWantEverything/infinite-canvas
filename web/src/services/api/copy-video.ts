@@ -4,6 +4,7 @@ import { buildApiUrl, type AiConfig } from "@/stores/use-config-store";
 import { requestGeneration } from "@/services/api/image";
 import { readAxiosError } from "@/services/api/http";
 import { VIDEO_POLL_INTERVAL, createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo } from "@/services/api/video";
+import type { UploadedFile } from "@/services/file-storage";
 import type { ReferenceImage } from "@/types/image";
 
 /** 爆款转绘的中间结构：角色/场景/物品 + 分镜。 */
@@ -395,21 +396,20 @@ export async function generateItemImage(config: AiConfig, item: CopyItem, signal
     return images[0].dataUrl;
 }
 
-/** 分镜 → 生成一段视频（首帧参考图可选），返回可播放的 URL。 */
+/** 分镜 → 生成一段视频（首帧参考图可选），返回已入库的素材（url + storageKey）。 */
 export async function generateShotVideo(
     config: AiConfig,
     shot: CopyShot,
     references: ReferenceImage[] = [],
     signal?: AbortSignal,
-): Promise<string> {
+): Promise<UploadedFile> {
     const prompt = shotPrompt(shot);
     const task = await createVideoGenerationTask(config, prompt, references, { signal });
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task);
         if (state.status === "completed") {
-            const stored = await storeGeneratedVideo(state.result);
-            return stored.url;
+            return storeGeneratedVideo(state.result);
         }
         if (state.status === "failed") throw new Error(state.error || "视频生成失败");
         await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL));

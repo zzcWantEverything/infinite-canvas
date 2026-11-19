@@ -427,6 +427,14 @@ export default {
         refHint: "{{n}} reference image(s)",
         uploadImage: "Upload image",
         generateHint: "Shot videos automatically use the characters/scenes of that shot as reference images for consistency; if none were generated it falls back to the images you already have.",
+        history: "History",
+        historyEmpty: "No history yet. Each finished analysis is saved automatically so you can come back and keep editing.",
+        historyShots: "{{count}} shots",
+        historyDeleteConfirm: "Delete this record? Generated images and videos are kept.",
+        historyLoadFailed: "Failed to load history",
+        historyDeleteFailed: "Failed to delete the record",
+        historyBroken: "This record is incomplete and cannot be loaded",
+        untitled: "Untitled",
     },
 
     topNav: {

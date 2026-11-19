@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input } from "antd";
-import { ChevronDown, ChevronUp, Clapperboard, ImagePlus, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { App, Button, Drawer, Input, Popconfirm } from "antd";
+import { ChevronDown, ChevronUp, Clapperboard, History, ImagePlus, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { CopySettingsPanel, createCopyGenSettings, type CopyGenSettings } from "@/components/copy/copy-settings-panel";
@@ -8,6 +8,9 @@ import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize, mediaRatioOptions } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
+import { awaitCloudUploads, serializeDoc } from "@/services/canvas-cloud";
+import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
 
@@ -16,6 +19,8 @@ const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
 const ANALYSIS_MODEL = "gpt-6-sol";
 
 type Section = "roles" | "scenes" | "items";
+/** 已入库的素材：url 只用于当前会话预览，storageKey 才是能跨设备找回的那份。 */
+type CopyMedia = { url: string; storageKey: string };
 
 export default function CopyVideoPage() {
     const { message } = App.useApp();
@@ -33,11 +38,26 @@ export default function CopyVideoPage() {
     const [progress, setProgress] = useState("");
     const [error, setError] = useState("");
     // 角色/场景/物品 → 生成图；分镜 → 生成视频
-    const [itemImages, setItemImages] = useState<Record<string, string>>({});
+    const [itemImages, setItemImages] = useState<Record<string, CopyMedia>>({});
     const [itemStatus, setItemStatus] = useState<Record<string, string>>({});
-    const [shotVideos, setShotVideos] = useState<Record<string, string>>({});
+    const [shotVideos, setShotVideos] = useState<Record<string, CopyMedia>>({});
     const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
     const [batchRunning, setBatchRunning] = useState<"" | "image" | "video">("");
+    // 当前编辑中的历史记录：分析完自动建一条，之后编辑/生成都更新它。
+    const [historyId, setHistoryId] = useState<number | null>(null);
+    const historyIdRef = useRef<number | null>(null);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [historyList, setHistoryList] = useState<CopyHistorySummary[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [sourceMeta, setSourceMeta] = useState<{ sceneCount?: number; frameCount?: number; duration?: number } | null>(null);
+    // 云端保存要等素材上传落地，串行化避免同一份记录并发写。
+    const savingRef = useRef(false);
+    const sessionToken = useUserStore((state) => state.session?.token || "");
+
+    const syncHistoryId = (id: number | null) => {
+        historyIdRef.current = id;
+        setHistoryId(id);
+    };
     // 统一参数：一套生图参数喂所有角色/场景/物品，一套生视频参数喂所有分镜。
     const [genSettings, setGenSettings] = useState<CopyGenSettings>(() => createCopyGenSettings(config));
 
@@ -158,6 +178,9 @@ export default function CopyVideoPage() {
             setProgress(t("copyVideo.analyzing"));
             const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, sessionToken, transcript);
             setAnalysis(result);
+            setSourceMeta({ sceneCount: meta.sceneCount, frameCount: frames.length });
+            // 新的一次分析 → 新的一条历史，之前的记录保持原样。
+            syncHistoryId(null);
             // 分析出的片子比例直接作为生图/生视频的默认比例，避免竖屏素材被生成成横屏。
             const ratio = (result.ratio || "").trim();
             if (mediaRatioOptions.some((item) => item.value === ratio)) patchSettings({ imageRatio: ratio, videoRatio: ratio });
@@ -247,12 +270,9 @@ export default function CopyVideoPage() {
         const id = uploadTargetRef.current;
         uploadTargetRef.current = null;
         if (!file || !id) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-            const dataUrl = String(reader.result || "");
-            if (dataUrl) setItemImages((prev) => ({ ...prev, [id]: dataUrl }));
-        };
-        reader.readAsDataURL(file);
+        void uploadMediaFile(file, "image").then((media) => {
+            setItemImages((prev) => ({ ...prev, [id]: { url: media.url, storageKey: media.storageKey } }));
+        });
     };
 
     const sections: { key: Section; label: string }[] = [
@@ -271,22 +291,26 @@ export default function CopyVideoPage() {
             const refs: ReferenceImage[] = [];
             for (const name of names) {
                 const item = items.find((entry) => entry.name === name);
-                const url = item ? itemImages[item.id] : undefined;
-                if (item && url) refs.push({ id: item.id, name: item.name, type: "image/png", dataUrl: url });
+                const media = item ? itemImages[item.id] : undefined;
+                if (item && media?.url) refs.push({ id: item.id, name: item.name, type: "image/png", dataUrl: media.url });
             }
             return refs;
         };
         const named = [...collect(shot.roles, analysis.roles), ...collect(shot.scenes, analysis.scenes), ...collect(shot.items, analysis.items)];
         if (named.length) return named.slice(0, 4);
-        const generated = (items: CopyItem[]) => items.filter((item) => itemImages[item.id]).map((item) => ({ id: item.id, name: item.name, type: "image/png", dataUrl: itemImages[item.id] }));
+        const generated = (items: CopyItem[]) =>
+            items.filter((item) => itemImages[item.id]?.url).map((item) => ({ id: item.id, name: item.name, type: "image/png", dataUrl: itemImages[item.id].url }));
         return [...generated(analysis.scenes), ...generated(analysis.roles)].slice(0, 2);
     };
 
     const runItemImage = async (item: CopyItem) => {
         setItemStatus((prev) => ({ ...prev, [item.id]: "running" }));
         try {
-            const url = await generateItemImage(imageConfig, item);
-            setItemImages((prev) => ({ ...prev, [item.id]: url }));
+            const dataUrl = await generateItemImage(imageConfig, item);
+            // 生成结果先落到本地素材库（随后台同步上云）：历史记录只存 storageKey，
+            // 否则一张几 MB 的 base64 会把记录撑爆。
+            const media = await uploadMediaFile(dataUrl, "image");
+            setItemImages((prev) => ({ ...prev, [item.id]: { url: media.url, storageKey: media.storageKey } }));
             setItemStatus((prev) => ({ ...prev, [item.id]: "done" }));
         } catch (e) {
             setItemStatus((prev) => ({ ...prev, [item.id]: "failed" }));
@@ -297,8 +321,8 @@ export default function CopyVideoPage() {
     const runShotVideo = async (shot: CopyShot) => {
         setShotStatus((prev) => ({ ...prev, [shot.id]: "running" }));
         try {
-            const url = await generateShotVideo(videoConfigFor(shot), shot, referencesForShot(shot));
-            setShotVideos((prev) => ({ ...prev, [shot.id]: url }));
+            const media = await generateShotVideo(videoConfigFor(shot), shot, referencesForShot(shot));
+            setShotVideos((prev) => ({ ...prev, [shot.id]: { url: media.url, storageKey: media.storageKey } }));
             setShotStatus((prev) => ({ ...prev, [shot.id]: "done" }));
         } catch (e) {
             setShotStatus((prev) => ({ ...prev, [shot.id]: "failed" }));
@@ -324,6 +348,116 @@ export default function CopyVideoPage() {
         setBatchRunning("");
     };
 
+    /** 历史里的素材只存 storageKey，换设备后靠它重新换回可访问的 URL。 */
+    const resolveMediaMap = async (map?: Record<string, CopyMedia>) => {
+        const resolved: Record<string, CopyMedia> = {};
+        for (const [id, media] of Object.entries(map || {})) {
+            if (!media?.storageKey) continue;
+            const url = await resolveMediaUrl(media.storageKey, "").catch(() => "");
+            if (url) resolved[id] = { url, storageKey: media.storageKey };
+        }
+        return resolved;
+    };
+
+    const refreshHistoryList = async () => {
+        if (!sessionToken) return;
+        setHistoryLoading(true);
+        try {
+            setHistoryList(await listCopyHistory(sessionToken));
+        } catch (e) {
+            message.error(e instanceof Error ? e.message : t("copyVideo.historyLoadFailed"));
+        } finally {
+            setHistoryLoading(false);
+        }
+    };
+
+    const openHistory = () => {
+        setHistoryOpen(true);
+        void refreshHistoryList();
+    };
+
+    /** 把当前编辑内容存成一条历史（首次创建，之后更新同一条）。 */
+    const persistHistory = async () => {
+        if (!analysis || !sessionToken || savingRef.current) return;
+        savingRef.current = true;
+        try {
+            // 素材上传是后台进行的，先等它们落地，serializeDoc 才能拿到 objectKey。
+            await awaitCloudUploads();
+            const doc = await serializeDoc({
+                version: 1,
+                title: analysis.title || "",
+                fileName: file?.name || "",
+                source: sourceMeta,
+                analysis,
+                settings: genSettings,
+                itemImages,
+                shotVideos,
+            });
+            const payload = { title: analysis.title || file?.name || "未命名", doc, shot_count: analysis.shots.length };
+            const current = historyIdRef.current;
+            if (current) {
+                await updateCopyHistory(sessionToken, current, payload);
+            } else {
+                const record = await createCopyHistory(sessionToken, payload);
+                syncHistoryId(record.id);
+            }
+        } catch (e) {
+            // 历史保存失败不该打断编辑，只记一条警告；用户下次改动会再试。
+            console.warn("copy history save failed", e);
+        } finally {
+            savingRef.current = false;
+        }
+    };
+
+    // 分析结果、参数、素材任一变化 → 1.5 秒后同步到云端历史。
+    useEffect(() => {
+        if (!analysis || !sessionToken) return;
+        const timer = window.setTimeout(() => void persistHistory(), 1500);
+        return () => window.clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [analysis, genSettings, itemImages, shotVideos, sessionToken]);
+
+    const loadHistory = async (id: number) => {
+        if (!sessionToken) return;
+        setHistoryLoading(true);
+        try {
+            const record = await getCopyHistory(sessionToken, id);
+            const doc = JSON.parse(record.doc || "{}") as {
+                analysis?: CopyAnalysis;
+                settings?: CopyGenSettings;
+                itemImages?: Record<string, CopyMedia>;
+                shotVideos?: Record<string, CopyMedia>;
+                source?: { sceneCount?: number; frameCount?: number } | null;
+            };
+            if (!doc.analysis) throw new Error(t("copyVideo.historyBroken"));
+            setAnalysis(doc.analysis);
+            setSourceMeta(doc.source ?? null);
+            if (doc.settings) setGenSettings({ ...createCopyGenSettings(config), ...doc.settings });
+            setItemImages(await resolveMediaMap(doc.itemImages));
+            setShotVideos(await resolveMediaMap(doc.shotVideos));
+            setItemStatus({});
+            setShotStatus({});
+            setError("");
+            syncHistoryId(record.id);
+            setHistoryOpen(false);
+        } catch (e) {
+            message.error(e instanceof Error ? e.message : t("copyVideo.historyLoadFailed"));
+        } finally {
+            setHistoryLoading(false);
+        }
+    };
+
+    const removeHistory = async (id: number) => {
+        if (!sessionToken) return;
+        try {
+            await deleteCopyHistory(sessionToken, id);
+            setHistoryList((prev) => prev.filter((item) => item.id !== id));
+            if (historyIdRef.current === id) syncHistoryId(null);
+        } catch (e) {
+            message.error(e instanceof Error ? e.message : t("copyVideo.historyDeleteFailed"));
+        }
+    };
+
     return (
         <main className="thin-scrollbar h-full overflow-y-auto bg-transparent">
             <div className="mx-auto w-full max-w-[1180px] px-5 pb-20 pt-6 sm:px-8 sm:pt-10">
@@ -335,11 +469,16 @@ export default function CopyVideoPage() {
                         </h1>
                         <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-500 dark:text-stone-400">{t("copyVideo.subtitle")}</p>
                     </div>
-                    {analysis ? (
-                        <Button icon={<Sparkles className="size-4" />} onClick={analyze} loading={analyzing}>
-                            {t("copyVideo.reanalyze")}
+                    <div className="flex items-center gap-2">
+                        <Button icon={<History className="size-4" />} onClick={openHistory}>
+                            {t("copyVideo.history")}
                         </Button>
-                    ) : null}
+                        {analysis ? (
+                            <Button icon={<Sparkles className="size-4" />} onClick={analyze} loading={analyzing}>
+                                {t("copyVideo.reanalyze")}
+                            </Button>
+                        ) : null}
+                    </div>
                 </div>
 
                 {!analysis ? (
@@ -430,7 +569,7 @@ export default function CopyVideoPage() {
                                                 placeholder={t("copyVideo.descPlaceholder")}
                                             />
                                             {itemImages[item.id] ? (
-                                                <img src={itemImages[item.id]} alt={item.name} className="max-h-40 w-full rounded-lg object-cover" />
+                                                <img src={itemImages[item.id].url} alt={item.name} className="max-h-40 w-full rounded-lg object-cover" />
                                             ) : null}
                                             <div className="flex gap-2">
                                                 <Button size="small" className="flex-1" icon={<Sparkles className="size-3.5" />} loading={itemStatus[item.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runItemImage(item)}>
@@ -487,7 +626,7 @@ export default function CopyVideoPage() {
                                             className="!text-xs"
                                         />
                                         <Input.TextArea value={shot.onScreenText} onChange={(event) => updateShot(shot.id, { onScreenText: event.target.value })} rows={1} placeholder={t("copyVideo.onScreenTextPlaceholder")} className="!text-xs" />
-                                        {shotVideos[shot.id] ? <video src={shotVideos[shot.id]} controls className="max-h-52 w-full rounded-lg bg-black object-contain" /> : null}
+                                        {shotVideos[shot.id] ? <video src={shotVideos[shot.id].url} controls className="max-h-52 w-full rounded-lg bg-black object-contain" /> : null}
                                         <Button size="small" icon={<Sparkles className="size-3.5" />} loading={shotStatus[shot.id] === "running"} disabled={Boolean(batchRunning)} onClick={() => void runShotVideo(shot)}>
                                             {shotVideos[shot.id] ? t("copyVideo.regenerate") : t("copyVideo.genVideo")}
                                         </Button>
@@ -529,6 +668,37 @@ export default function CopyVideoPage() {
                     event.target.value = "";
                 }}
             />
+
+            <Drawer title={t("copyVideo.history")} placement="right" width={380} open={historyOpen} onClose={() => setHistoryOpen(false)}>
+                <div className="flex flex-col gap-2">
+                    {historyLoading && !historyList.length ? (
+                        <div className="flex items-center gap-2 py-6 text-sm text-stone-500">
+                            <Loader2 className="size-4 animate-spin" />
+                            {t("common.loading")}
+                        </div>
+                    ) : null}
+                    {!historyLoading && !historyList.length ? <div className="py-6 text-sm text-stone-500 dark:text-stone-400">{t("copyVideo.historyEmpty")}</div> : null}
+                    {historyList.map((item) => (
+                        <div
+                            key={item.id}
+                            className={[
+                                "flex items-center justify-between gap-2 rounded-xl border p-3 transition",
+                                item.id === historyId ? "border-stone-400 bg-stone-50 dark:border-stone-600 dark:bg-stone-900" : "border-stone-200 hover:border-stone-300 dark:border-stone-800",
+                            ].join(" ")}
+                        >
+                            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => void loadHistory(item.id)}>
+                                <div className="truncate text-sm font-medium text-stone-800 dark:text-stone-100">{item.title || t("copyVideo.untitled")}</div>
+                                <div className="mt-0.5 truncate text-xs text-stone-500 dark:text-stone-400">
+                                    {formatHistoryTime(item.updated_at || item.created_at)} · {t("copyVideo.historyShots", { count: item.shot_count })}
+                                </div>
+                            </button>
+                            <Popconfirm title={t("copyVideo.historyDeleteConfirm")} okText={t("common.delete")} cancelText={t("common.cancel")} onConfirm={() => void removeHistory(item.id)}>
+                                <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} />
+                            </Popconfirm>
+                        </div>
+                    ))}
+                </div>
+            </Drawer>
         </main>
     );
 }
