@@ -165,7 +165,8 @@ export default function CopyVideoPage() {
             setProgress(t("copyVideo.extracting"));
             const { frames, meta } = await extractSceneFrames(file, 32);
             setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
-            const grid = await buildFrameGrid(frames);
+            // 按视频真实比例排版：竖屏不再被塞进 16:9 的格子留两条黑边。
+            const grid = await buildFrameGrid(frames, meta.width / meta.height);
             // 音轨转写（失败降级为无台词，不阻塞分析）
             setProgress(t("copyVideo.transcribing"));
             let transcript = "";

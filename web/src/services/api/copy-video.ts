@@ -82,6 +82,9 @@ function analysisPrompt(meta: CopyVideoMeta) {
 3. 画面里出现的数字/价签只写在画面/画面文字字段；只有实际说出的内容才进口播或旁白，两者不要混。
 4. 品牌、包装、价格、数量、原话按原片记录，不要改写或替换。
 5. 角色/场景/物品去重合并，名称简短；分镜里的名称必须与 roles/scenes/items 的 name 完全一致。
+6. 宫格是降采样过的缩略图：人脸、小字、远景细节本来就糊。看不清就写「画面不清晰」或只描述能确认的部分（发型、服装主色、道具外形、人物站位），
+   绝对不要凭常识补出品牌名、价格、字幕内容。宁可少写，不可编造。
+7. 时间码以宫格上标注的时间戳为准：镜头起点在某一格附近就用那一格的时间，不要按帧率自行推算。
 
 严格返回 JSON（不要 markdown 代码块）：
 {
@@ -190,57 +193,95 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
             candidates.push({ time: t, diff, dataUrl: full.toDataURL("image/jpeg", 0.78) });
         }
 
-        // 先按差异找「镜头切换」作为场景边界，再在每个场景内均匀多抽几帧，
-        // 这样同一个场景里的动作推进也能被看到，而不是每个场景只有一张定格。
+        // 先按差异找「镜头切换」作为场景边界，再在每个场景内挑帧。
+        // 关键约束：每个场景至少留 1 帧（切点后的那一帧最能代表镜头起幅），
+        // 剩余预算按场景时长加权分配——之前是「每个场景 4 帧再全时间轴掐到 32」，
+        // 场景一多就会把某些场景整段丢掉，模型自然漏角色/漏分镜。
         const threshold = 0.06;
-        const sceneChanges = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
-        const framesPerScene = 4;
-        const picked: typeof candidates = [];
-        for (let i = 0; i < sceneChanges.length; i++) {
-            const startTime = sceneChanges[i].time;
-            const endTime = i + 1 < sceneChanges.length ? sceneChanges[i + 1].time : duration;
-            const span = Math.max(endTime - startTime, 0.01);
-            for (let j = 0; j < framesPerScene; j++) {
-                const target = startTime + (span * (j + 0.5)) / framesPerScene;
-                // 取离目标时间最近的候选帧
-                let closest = candidates[0];
-                let closestDelta = Math.abs(candidates[0].time - target);
-                for (const candidate of candidates) {
-                    const delta = Math.abs(candidate.time - target);
-                    if (delta < closestDelta) {
-                        closest = candidate;
-                        closestDelta = delta;
-                    }
+        const sceneStarts = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
+        const scenes = sceneStarts.map((item, index) => ({
+            start: item.time,
+            end: index + 1 < sceneStarts.length ? sceneStarts[index + 1].time : duration,
+        }));
+        const frameAt = (time: number) => {
+            let closest = candidates[0];
+            let closestDelta = Math.abs(candidates[0].time - time);
+            for (const candidate of candidates) {
+                const delta = Math.abs(candidate.time - time);
+                if (delta < closestDelta) {
+                    closest = candidate;
+                    closestDelta = delta;
                 }
-                picked.push(closest);
             }
+            return closest;
+        };
+        const pickedTimes: number[] = [];
+        if (scenes.length >= maxFrames) {
+            // 场景比帧预算还多：只能每个入选场景各一帧，按时间均匀挑场景，保证覆盖整条时间线。
+            for (let i = 0; i < maxFrames; i += 1) {
+                const scene = scenes[Math.round((i * (scenes.length - 1)) / Math.max(1, maxFrames - 1))];
+                pickedTimes.push(frameAt(scene.start).time);
+            }
+        } else {
+            const totalDuration = Math.max(duration, 0.1);
+            const extra = maxFrames - scenes.length;
+            scenes.forEach((scene) => {
+                const span = Math.max(scene.end - scene.start, 0.01);
+                // 按场景时长占比分额外帧，单个场景最多 4 帧（再多也是同一段画面）
+                const share = Math.min(3, Math.floor((extra * span) / totalDuration + 0.5));
+                const count = 1 + Math.max(0, share);
+                if (count === 1) {
+                    pickedTimes.push(frameAt(scene.start).time);
+                    return;
+                }
+                // 起幅 → … → 收幅：保留镜头开始和结束，中间均匀铺开
+                for (let j = 0; j < count; j += 1) {
+                    const ratio = j === count - 1 ? 0.92 : (j / (count - 1)) * 0.5;
+                    pickedTimes.push(frameAt(scene.start + span * ratio).time);
+                }
+            });
         }
-        // 超出上限时按时间均匀抽，避免请求过大
-        let finalPicked = picked;
-        if (picked.length > maxFrames) {
-            const sorted = [...picked].sort((a, b) => a.time - b.time);
-            finalPicked = Array.from({ length: maxFrames }, (_, i) => sorted[Math.round((i * (sorted.length - 1)) / (maxFrames - 1))]);
-        }
-        const unique = Array.from(new Map(finalPicked.map((item) => [item.time, item])).values()).sort((a, b) => a.time - b.time);
+        const uniqueTimes = Array.from(new Set(pickedTimes)).sort((a, b) => a - b).slice(0, maxFrames);
+        const finalPicked = uniqueTimes.map((time) => candidates.find((item) => item.time === time) ?? frameAt(time));
 
         return {
-            frames: unique.map((item) => ({ time: item.time, dataUrl: item.dataUrl })),
-            meta: { duration, width, height, frameCount: unique.length, sceneCount: sceneChanges.length },
+            frames: finalPicked.map((item) => ({ time: item.time, dataUrl: item.dataUrl })),
+            meta: { duration, width, height, frameCount: finalPicked.length, sceneCount: sceneStarts.length },
         };
     } finally {
         URL.revokeObjectURL(src);
     }
 }
 
-/** 把关键帧拼成宫格图（每格带序号和时间），一次请求就能让模型看到整条时间线。 */
-export async function buildFrameGrid(frames: CopyFrame[], cols = 4): Promise<string> {
-    const cellWidth = 200;
-    const cellHeight = 112;
-    const labelHeight = 18;
-    const rows = Math.ceil(frames.length / cols);
+/**
+ * 把关键帧拼成宫格图（每格带序号和时间），一次请求就能让模型看到整条时间线。
+ *
+ * 格子尺寸不再是固定 200×112：按视频比例和帧数算「在像素预算内面积最大」的排布。
+ * 之前竖屏视频也被塞进 16:9 的格子，两侧全是黑边，一半像素白白浪费；
+ * 竖屏现在会排成 6~8 列，单格面积提升约 2.5 倍，模型才看得清服装、道具和画面文字。
+ */
+export async function buildFrameGrid(frames: CopyFrame[], aspect = 16 / 9): Promise<string> {
+    const MAX_WIDTH = 1400;
+    const MAX_HEIGHT = 1568; // 主流多模态模型的最优输入长边
+    const LABEL_HEIGHT = 18;
+    const safeAspect = Number.isFinite(aspect) && aspect >= 0.3 && aspect <= 3 ? aspect : 16 / 9;
+
+    let best = { cols: 4, rows: Math.ceil(frames.length / 4), cellWidth: 0, cellHeight: 0 };
+    for (let cols = 2; cols <= Math.min(12, Math.max(2, frames.length)); cols += 1) {
+        const rows = Math.ceil(frames.length / cols);
+        const heightBudget = MAX_HEIGHT - rows * LABEL_HEIGHT;
+        if (heightBudget <= 0) continue;
+        const byWidth = MAX_WIDTH / cols;
+        const byHeight = (heightBudget / rows) * safeAspect;
+        const cellWidth = Math.floor(Math.min(byWidth, byHeight));
+        const cellHeight = Math.floor(cellWidth / safeAspect);
+        if (cellWidth * cellHeight > best.cellWidth * best.cellHeight) best = { cols, rows, cellWidth, cellHeight };
+    }
+    const { cols, rows, cellWidth, cellHeight } = best;
+
     const canvas = document.createElement("canvas");
     canvas.width = cellWidth * cols;
-    canvas.height = (cellHeight + labelHeight) * rows;
+    canvas.height = (cellHeight + LABEL_HEIGHT) * rows;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("浏览器不支持 canvas 拼图");
     ctx.fillStyle = "#111827";
@@ -261,18 +302,18 @@ export async function buildFrameGrid(frames: CopyFrame[], cols = 4): Promise<str
         const col = index % cols;
         const row = Math.floor(index / cols);
         const x = col * cellWidth;
-        const y = row * (cellHeight + labelHeight);
+        const y = row * (cellHeight + LABEL_HEIGHT);
         ctx.fillStyle = "#1f2937";
-        ctx.fillRect(x, y + labelHeight, cellWidth, cellHeight);
-        if (images[index]?.complete) ctx.drawImage(images[index], x, y + labelHeight, cellWidth, cellHeight);
+        ctx.fillRect(x, y + LABEL_HEIGHT, cellWidth, cellHeight);
+        if (images[index]?.complete) ctx.drawImage(images[index], x, y + LABEL_HEIGHT, cellWidth, cellHeight);
         ctx.fillStyle = "rgba(17,24,39,0.9)";
-        ctx.fillRect(x, y, cellWidth, labelHeight);
+        ctx.fillRect(x, y, cellWidth, LABEL_HEIGHT);
         ctx.fillStyle = "#f9fafb";
         ctx.font = "12px sans-serif";
         ctx.textBaseline = "middle";
-        ctx.fillText(`#${index + 1}  ${frame.time.toFixed(1)}s`, x + 6, y + labelHeight / 2);
+        ctx.fillText(`#${index + 1}  ${frame.time.toFixed(1)}s`, x + 6, y + LABEL_HEIGHT / 2);
     });
-    return canvas.toDataURL("image/jpeg", 0.82);
+    return canvas.toDataURL("image/jpeg", 0.85);
 }
 
 /** 调用多模态模型分析宫格图。sessionToken 必须是后台登录态 token（不是中转 key）。 */
