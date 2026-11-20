@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Drawer, Input, Popconfirm } from "antd";
+import { App, Button, Drawer, Input, Popconfirm, Progress } from "antd";
 import { ChevronDown, ChevronUp, Clapperboard, History, ImagePlus, Loader2, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -35,7 +35,8 @@ export default function CopyVideoPage() {
     const [videoUrl, setVideoUrl] = useState("");
     const [analysis, setAnalysis] = useState<CopyAnalysis | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
-    const [progress, setProgress] = useState("");
+    // 只暴露一个百分比进度条：分批/抽帧/转写这些过程对用户没意义。
+    const [analysisPercent, setAnalysisPercent] = useState(0);
     const [error, setError] = useState("");
     // 角色/场景/物品 → 生成图；分镜 → 生成视频
     const [itemImages, setItemImages] = useState<Record<string, CopyMedia>>({});
@@ -162,11 +163,11 @@ export default function CopyVideoPage() {
         setError("");
         setAnalysis(null);
         try {
-            setProgress(t("copyVideo.extracting"));
+            setAnalysisPercent(5);
             const { frames, meta } = await extractSceneFrames(file, 32);
-            setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
+            setAnalysisPercent(12);
             // 音轨转写（失败降级为无台词，不阻塞分析）
-            setProgress(t("copyVideo.transcribing"));
+            setAnalysisPercent(20);
             let transcript = "";
             try {
                 const audio = await extractAudioWav(file);
@@ -179,11 +180,7 @@ export default function CopyVideoPage() {
             const batches = groupFramesIntoBatches(frames);
             let result: CopyAnalysis | null = null;
             for (let index = 0; index < batches.length; index += 1) {
-                setProgress(
-                    batches.length > 1
-                        ? t("copyVideo.analyzingBatch", { current: index + 1, total: batches.length })
-                        : t("copyVideo.analyzing"),
-                );
+                setAnalysisPercent(20 + Math.round((index / batches.length) * 72));
                 const batchFrames = batches[index];
                 const grid = await buildFrameGrid(batchFrames, meta.width / meta.height);
                 let partial: CopyAnalysis;
@@ -202,6 +199,7 @@ export default function CopyVideoPage() {
                     break;
                 }
                 result = result ? mergeBatchAnalyses([result, partial]) : partial;
+                setAnalysisPercent(20 + Math.round(((index + 1) / batches.length) * 72));
             }
             if (!result) throw new Error(t("copyVideo.analyzeFailed"));
             setAnalysis(result);
@@ -217,7 +215,7 @@ export default function CopyVideoPage() {
             setError(e instanceof Error ? e.message : t("copyVideo.analyzeFailed"));
         } finally {
             setAnalyzing(false);
-            setProgress("");
+            setAnalysisPercent(0);
         }
     };
 
@@ -553,15 +551,15 @@ export default function CopyVideoPage() {
                         )}
 
                         <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div className="text-xs text-stone-500 dark:text-stone-400">{t("copyVideo.analysisHint", { model: ANALYSIS_MODEL })}</div>
+                            <div className="text-xs text-stone-500 dark:text-stone-400">{t("copyVideo.analysisHint")}</div>
                             <Button type="primary" shape="round" icon={<Sparkles className="size-4" />} onClick={analyze} loading={analyzing} disabled={!file}>
                                 {t("copyVideo.analyze")}
                             </Button>
                         </div>
-                        {progress ? (
-                            <div className="flex items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
-                                <Loader2 className="size-3.5 animate-spin" />
-                                {progress}
+                        {analyzing ? (
+                            <div className="flex items-center gap-3">
+                                <Progress percent={analysisPercent} showInfo={false} size="small" strokeColor="#78716c" className="!mb-0 flex-1" />
+                                <span className="w-9 shrink-0 text-right text-xs tabular-nums text-stone-500 dark:text-stone-400">{analysisPercent}%</span>
                             </div>
                         ) : null}
                         {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">{error}</div> : null}

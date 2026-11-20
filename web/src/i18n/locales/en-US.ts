@@ -395,7 +395,7 @@ export default {
         analyzeFailed: "Analysis failed, please retry",
         analyze: "Analyze",
         reanalyze: "Re-analyze",
-        analysisHint: "Analyze the video with {{model}} to extract characters, scenes, props and shots",
+        analysisHint: "AI analyzes the video into characters, scenes, props and shots",
         remove: "Remove video",
         roles: "Characters",
         scenes: "Scenes",

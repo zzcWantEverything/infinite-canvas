@@ -395,7 +395,7 @@ export default {
         analyzeFailed: "分析失败，请重试",
         analyze: "开始分析",
         reanalyze: "重新分析",
-        analysisHint: "用 {{model}} 分析视频，提取角色、场景、物品与分镜",
+        analysisHint: "AI 分析视频，提取角色、场景、物品与分镜",
         remove: "移除视频",
         roles: "角色",
         scenes: "场景",
