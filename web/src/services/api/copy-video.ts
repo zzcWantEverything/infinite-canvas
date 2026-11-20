@@ -620,13 +620,16 @@ function closeUnclosedJson(value: string): string {
 
 function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     const stamp = Date.now();
-    const toItems = (value: unknown): CopyItem[] =>
+    // id 必须按分区加前缀：roles/scenes/items 各自从 0 开始编号，
+    // 之前三个分区都用 `item-<stamp>-<index>`，导致角色 0 / 场景 0 / 物品 0 是同一个 id，
+    // 生成一张图会同时显示在三个分区里（itemImages 是按 id 存的），后续生成还会互相覆盖。
+    const toItems = (value: unknown, section: "roles" | "scenes" | "items"): CopyItem[] =>
         (Array.isArray(value) ? value : [])
             .map((item, index) => {
                 const record = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
                 const name = String(record.name ?? "").trim();
                 if (!name) return null;
-                return { id: `item-${stamp}-${index}`, name, description: String(record.description ?? "").trim() };
+                return { id: `${section}-${stamp}-${index}`, name, description: String(record.description ?? "").trim() };
             })
             .filter((item): item is CopyItem => Boolean(item));
     const toShots = (value: unknown): CopyShot[] =>
@@ -657,9 +660,9 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     return {
         title: String(raw.title ?? "").trim() || "爆款转绘",
         ratio: String(raw.ratio ?? "").trim(),
-        roles: toItems(raw.roles),
-        scenes: toItems(raw.scenes),
-        items: toItems(raw.items),
+        roles: toItems(raw.roles, "roles"),
+        scenes: toItems(raw.scenes, "scenes"),
+        items: toItems(raw.items, "items"),
         shots: toShots(raw.shots),
     };
 }

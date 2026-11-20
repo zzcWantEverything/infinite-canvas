@@ -233,7 +233,7 @@ export default function CopyVideoPage() {
     };
 
     const addItem = (section: Section) => {
-        setAnalysis((prev) => (prev ? { ...prev, [section]: [...prev[section], { id: `item-${Date.now()}`, name: "", description: "" }] } : prev));
+        setAnalysis((prev) => (prev ? { ...prev, [section]: [...prev[section], { id: `${section}-${Date.now()}`, name: "", description: "" }] } : prev));
     };
 
     const updateShot = (id: string, patch: Partial<CopyShot>) => {
@@ -487,7 +487,7 @@ export default function CopyVideoPage() {
 
     return (
         <main className="thin-scrollbar h-full overflow-y-auto bg-transparent">
-            <div className="mx-auto w-full max-w-[1180px] px-5 pb-20 pt-6 sm:px-8 sm:pt-10">
+            <div className="mx-auto w-full max-w-[1720px] px-5 pb-20 pt-6 sm:px-8 sm:pt-10">
                 <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
                     <div>
                         <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight text-stone-950 sm:text-2xl dark:text-stone-50">
@@ -582,7 +582,7 @@ export default function CopyVideoPage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                                     {analysis[section.key].map((item) => (
                                         <div key={item.id} className="flex flex-col gap-2 rounded-xl border border-stone-200/70 p-3 dark:border-stone-800">
                                             <div className="flex items-center gap-2">
@@ -622,7 +622,7 @@ export default function CopyVideoPage() {
                                         </Button>
                                     </div>
                                 </div>
-                            <div className="flex flex-col gap-3">
+                            <div className="grid gap-3 xl:grid-cols-2">
                                 {analysis.shots.map((shot, index) => (
                                     <div key={shot.id} className="flex flex-col gap-2 rounded-xl border border-stone-200/70 p-3 dark:border-stone-800">
                                         <div className="flex flex-wrap items-center gap-2">
