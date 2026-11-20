@@ -243,8 +243,7 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
 
         // 先按差异找「镜头切换」作为场景边界，再在每个场景内挑帧。
         // 关键约束：每个场景至少留 1 帧（切点后的那一帧最能代表镜头起幅），
-        // 剩余预算按场景时长加权分配——之前是「每个场景 4 帧再全时间轴掐到 32」，
-        // 场景一多就会把某些场景整段丢掉，模型自然漏角色/漏分镜。
+        // 先做切点检测，选帧时按「每秒一帧 + 切点首帧」，所以这里只需要边界，不再按场景配额分帧。
         const threshold = 0.06;
         const sceneStarts = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
         const scenes = sceneStarts.map((item, index) => ({
@@ -263,38 +262,46 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
             }
             return closest;
         };
-        const picked: { time: number; scene: number }[] = [];
-        if (scenes.length >= maxFrames) {
-            // 场景比帧预算还多：只能每个入选场景各一帧，按时间均匀挑场景，保证覆盖整条时间线。
-            for (let i = 0; i < maxFrames; i += 1) {
-                const sceneIndex = Math.round((i * (scenes.length - 1)) / Math.max(1, maxFrames - 1));
-                picked.push({ time: frameAt(scenes[sceneIndex].start).time, scene: sceneIndex });
+        // 选帧策略：**每秒一帧**打底，再补每个切点的首帧。
+        // 之前按场景分配（每场景 1~4 帧）在短剧上密度太低——12 秒的片子可能只给模型 3~6 格，
+        // 硬切、手部动作、字幕变化全看不到。对标工具就是 1 fps 铺满整条时间线。
+        const sceneIndexOf = (time: number) => {
+            let index = 0;
+            for (let i = 0; i < scenes.length; i += 1) {
+                if (scenes[i].start <= time + 0.001) index = i;
+                else break;
             }
-        } else {
-            const totalDuration = Math.max(duration, 0.1);
-            const extra = maxFrames - scenes.length;
-            scenes.forEach((scene, sceneIndex) => {
-                const span = Math.max(scene.end - scene.start, 0.01);
-                // 按场景时长占比分额外帧，单个场景最多 4 帧（再多也是同一段画面）
-                const share = Math.min(3, Math.floor((extra * span) / totalDuration + 0.5));
-                const count = 1 + Math.max(0, share);
-                if (count === 1) {
-                    picked.push({ time: frameAt(scene.start).time, scene: sceneIndex });
-                    return;
-                }
-                // 起幅 → … → 收幅：保留镜头开始和结束，中间均匀铺开
-                for (let j = 0; j < count; j += 1) {
-                    const ratio = j === count - 1 ? 0.92 : (j / (count - 1)) * 0.5;
-                    picked.push({ time: frameAt(scene.start + span * ratio).time, scene: sceneIndex });
-                }
-            });
-        }
+            return index;
+        };
+        const picked: { time: number; scene: number }[] = [];
+        const seenTime = new Set<number>();
+        const addFrame = (time: number) => {
+            const frame = frameAt(time);
+            if (seenTime.has(frame.time)) return;
+            seenTime.add(frame.time);
+            picked.push({ time: frame.time, scene: sceneIndexOf(frame.time) });
+        };
+        // 1) 每秒一帧（0s, 1s, 2s…），短于 1 秒的间隔也补最后一帧
+        for (let t = 0; t < duration; t += 1) addFrame(t);
+        addFrame(Math.max(0, duration - 0.05));
+        // 2) 每个切点的首帧：1 秒网格可能正好跨过极短的硬切，补上才不会漏镜头
+        sceneStarts.slice(1).forEach((item) => addFrame(item.time));
+
         const uniqueByTime = new Map<number, { time: number; scene: number }>();
         picked.forEach((item) => {
             if (!uniqueByTime.has(item.time)) uniqueByTime.set(item.time, item);
         });
-        const finalPicked = Array.from(uniqueByTime.values())
-            .sort((a, b) => a.time - b.time)
+        let pickedFrames = Array.from(uniqueByTime.values()).sort((a, b) => a.time - b.time);
+        if (pickedFrames.length > maxFrames) {
+            // 超预算：先保住每个切点的首帧（镜头起幅最要紧），剩下的按时间均匀抽，别让某段整段消失
+            const cutTimes = new Set(sceneStarts.map((item) => item.time));
+            const cuts = pickedFrames.filter((item) => cutTimes.has(item.time));
+            const others = pickedFrames.filter((item) => !cutTimes.has(item.time));
+            const room = Math.max(0, maxFrames - cuts.length);
+            const thinned = room > 0 ? Array.from({ length: room }, (_, i) => others[Math.round((i * (others.length - 1)) / Math.max(1, room - 1))]) : [];
+            pickedFrames = [...cuts, ...thinned].filter((item, index, list) => list.findIndex((other) => other.time === item.time) === index).sort((a, b) => a.time - b.time);
+        }
+        const finalPicked = pickedFrames
             .slice(0, maxFrames)
             .map((item) => ({ ...item, frame: candidates.find((candidate) => candidate.time === item.time) ?? frameAt(item.time) }));
 
