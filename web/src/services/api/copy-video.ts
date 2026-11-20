@@ -53,6 +53,71 @@ export type CopyAnalysis = {
 
 export type CopyFrame = { time: number; dataUrl: string; /** 所属场景（镜头）序号，分批分析时用来保证一批不跨太多镜头 */ scene: number };
 
+
+/** 16 档 RGB 直方图（48 个 bin），对摇镜、曝光漂移不敏感。 */
+const HIST_BINS = 16;
+
+function frameHistogram(pixels: Uint8ClampedArray, out: Float32Array) {
+    out.fill(0);
+    const total = pixels.length / 4;
+    for (let i = 0; i < pixels.length; i += 4) {
+        out[pixels[i] >> 4] += 1;
+        out[HIST_BINS + (pixels[i + 1] >> 4)] += 1;
+        out[HIST_BINS * 2 + (pixels[i + 2] >> 4)] += 1;
+    }
+    const scale = 1 / (total * 3);
+    for (let i = 0; i < out.length; i += 1) out[i] *= scale;
+    return out;
+}
+
+function histogramDistance(a: Float32Array, b: Float32Array) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - b[i]);
+    return sum / 2;
+}
+
+type FrameSample = { time: number; pixelDiff: number; histDiff: number; dataUrl: string };
+
+/**
+ * 切点判定（双阈值 + 渐变检测）：
+ * - 硬切：瞬时跳变大（像素差 ≥0.10 或直方图差 ≥0.30）→ 立刻切
+ * - 叠化/淡入淡出：画面是渐变的，单帧跳变很小，靠「连续 ≥3 个软信号 + 累积量够大」判定，
+ *   在整段渐变的中间切一刀。之前只看固定阈值 0.06，叠化会被整段并成一个镜头。
+ */
+function detectSceneStarts(candidates: FrameSample[]) {
+    const HARD_PIXEL = 0.1;
+    const HARD_HIST = 0.3;
+    const SOFT_PIXEL = 0.035;
+    const SOFT_HIST = 0.1;
+    const hard = (d: FrameSample) => d.pixelDiff >= HARD_PIXEL || d.histDiff >= HARD_HIST;
+    const soft = (d: FrameSample) => d.pixelDiff >= SOFT_PIXEL || d.histDiff >= SOFT_HIST;
+
+    const cuts = new Set<number>([0]);
+    for (let i = 1; i < candidates.length; i += 1) {
+        if (hard(candidates[i])) cuts.add(i);
+    }
+    // 渐变段：连续软信号但都不够硬，累积变化够大就当一次转场
+    let runStart = -1;
+    for (let i = 1; i <= candidates.length; i += 1) {
+        const isSoft = i < candidates.length && soft(candidates[i]) && !hard(candidates[i]);
+        if (isSoft && runStart < 0) runStart = i;
+        if (!isSoft && runStart >= 0) {
+            const span = i - runStart;
+            let pixelSum = 0;
+            let histSum = 0;
+            for (let j = runStart; j < i; j += 1) {
+                pixelSum += candidates[j].pixelDiff;
+                histSum += candidates[j].histDiff;
+            }
+            if (span >= 3 && (pixelSum >= HARD_PIXEL * 1.5 || histSum >= HARD_HIST * 1.2)) {
+                cuts.add(runStart + Math.floor(span / 2));
+            }
+            runStart = -1;
+        }
+    }
+    return [...cuts].sort((a, b) => a - b).map((index) => candidates[index]);
+}
+
 /** 前端抽帧的硬上限：超过 10 分钟 seek 次数太多，体验不可接受。 */
 export const MAX_VIDEO_SECONDS = 600;
 
@@ -62,6 +127,8 @@ export type CopyVideoMeta = {
     height: number;
     frameCount: number;
     sceneCount: number;
+    /** 检测到的切点时间（秒），提示词里给模型当分镜边界参考 */
+    cuts?: number[];
 };
 
 export type CopyAnalyzeBatch = {
@@ -71,9 +138,19 @@ export type CopyAnalyzeBatch = {
     /** 本批覆盖的时间范围（秒） */
     startTime: number;
     endTime: number;
+    /** 本批范围内的切点时间（秒） */
+    cuts?: number[];
     /** 前几批已经定下来的名字，本批必须沿用，避免同一个人被叫成两个名字 */
     known?: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
 };
+
+/** 切点列表转成提示词里的短串：太多就折叠，避免把提示词撑长。 */
+function formatCuts(cuts: number[] | undefined, max = 40) {
+    if (!cuts || !cuts.length) return "";
+    const list = cuts.slice(0, max).map((time) => `${time.toFixed(1)}s`);
+    if (cuts.length > max) list.push(`等共 ${cuts.length} 处`);
+    return list.join("、");
+}
 
 function batchContext(batch?: CopyAnalyzeBatch) {
     if (!batch || batch.total <= 1) return "";
@@ -84,6 +161,9 @@ function batchContext(batch?: CopyAnalyzeBatch) {
         `【分批说明】这是第 ${batch.index}/${batch.total} 批，宫格里所有格子都落在 ${batch.startTime.toFixed(1)}~${batch.endTime.toFixed(1)} 秒之间。`,
         "只输出本批时间范围内的分镜，不要重复其他批次的镜头。",
     ];
+    if (batch.cuts && batch.cuts.length) {
+        lines.push(`本批检测到 ${batch.cuts.length} 处切点：${formatCuts(batch.cuts)}。分镜边界要对齐这些切点。`);
+    }
     if (known && (known.roles.length || known.scenes.length || known.items.length)) {
         lines.push("【已确认清单】前面几批已经定下的对象，本批凡是同一对象必须沿用下面的 name，不要另起新名：");
         if (known.roles.length) lines.push(`角色：${list(known.roles)}`);
@@ -102,11 +182,14 @@ function analysisPrompt(meta: CopyVideoMeta, batch?: CopyAnalyzeBatch) {
 - 分辨率：${meta.width}x${meta.height}
 - 抽帧：${meta.frameCount} 格（已按画面差异挑选，共 ${meta.sceneCount} 个场景切换）
 - 输入是宫格图，每格标了序号和它所属的时间点；格子是降采样缩略图，细节本来就有限。
+${meta.cuts && meta.cuts.length ? `- 已检测到的切点：${formatCuts(meta.cuts)}` : ""}
 ${batchContext(batch)}
 
 一、按原片切点逐镜拆解
 1. 先给出原片比例和总时长（写进 ratio 和 title 字段）。
 2. 每次硬切、机位变化或明显转场都单独编号。极短的产品特写、手部动作、人物反应镜头也要保留。
+   上面列出的「已检测到切点」是硬切/转场的时间点：每个切点都要开启一个新的分镜，起止时间与它对齐。
+   如果画面里还有明显切换但没被列出（叠化、快速运动），按画面自己补一个分镜。
 3. 时间码精确到 0.1 秒，统一写成 "12.3秒" 这种格式。
 4. 每 30 秒划一组，用 group 字段标组号（从 1 开始），最后一组按实际时长写。跨组镜头保留原切点和连续动作，台词只录一次。
 
@@ -221,31 +304,38 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
             });
 
         // 动态步长：短视频抓得细，长视频降采样，保证 seek 次数可控（10 分钟内最多约 600 次）
-        const step = duration <= 60 ? 0.4 : duration <= 300 ? 1 : 2;
+        // 采样步长：短视频 0.2 秒（更容易踩到极短镜头），seek 总数仍控制在 600 以内。
+        const step = duration <= 60 ? 0.2 : duration <= 300 ? 0.5 : 1;
         let previous: Uint8ClampedArray | null = null;
-        const candidates: { time: number; diff: number; dataUrl: string }[] = [];
+        let previousHist: Float32Array | null = null;
+        const hist = new Float32Array(HIST_BINS * 3);
+        const candidates: { time: number; pixelDiff: number; histDiff: number; dataUrl: string }[] = [];
         for (let t = 0; t < duration; t += step) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
             await seek(t);
             thumbCtx.drawImage(video, 0, 0, thumb.width, thumb.height);
             const pixels = thumbCtx.getImageData(0, 0, thumb.width, thumb.height).data;
-            let diff = 0;
+            let pixelDiff = 0;
             if (previous) {
                 for (let i = 0; i < pixels.length; i += 4) {
-                    diff += Math.abs(pixels[i] - previous[i]) + Math.abs(pixels[i + 1] - previous[i + 1]) + Math.abs(pixels[i + 2] - previous[i + 2]);
+                    pixelDiff += Math.abs(pixels[i] - previous[i]) + Math.abs(pixels[i + 1] - previous[i + 1]) + Math.abs(pixels[i + 2] - previous[i + 2]);
                 }
-                diff /= (pixels.length / 4) * 3 * 255;
+                pixelDiff /= (pixels.length / 4) * 3 * 255;
             }
             previous = new Uint8ClampedArray(pixels);
+            // 直方图差分对摇镜、曝光变化不敏感，逐像素差分对同色系硬切更敏感，两个一起用。
+            const currentHist = frameHistogram(pixels, hist);
+            const histDiff = previousHist ? histogramDistance(currentHist, previousHist) : 0;
+            previousHist = Float32Array.from(currentHist);
             fullCtx.drawImage(video, 0, 0, full.width, full.height);
-            candidates.push({ time: t, diff, dataUrl: full.toDataURL("image/jpeg", 0.78) });
+            candidates.push({ time: t, pixelDiff, histDiff, dataUrl: full.toDataURL("image/jpeg", 0.78) });
         }
 
         // 先按差异找「镜头切换」作为场景边界，再在每个场景内挑帧。
         // 关键约束：每个场景至少留 1 帧（切点后的那一帧最能代表镜头起幅），
-        // 先做切点检测，选帧时按「每秒一帧 + 切点首帧」，所以这里只需要边界，不再按场景配额分帧。
-        const threshold = 0.06;
-        const sceneStarts = candidates.filter((item, index) => index === 0 || item.diff >= threshold);
+        // 切点检测：硬切看瞬时跳变，叠化/淡入淡出看「连续多帧小幅变化」的累积。
+        // 选帧时按「每秒一帧 + 切点首帧」，这里只需要边界，不再按场景配额分帧。
+        const sceneStarts = detectSceneStarts(candidates);
         const scenes = sceneStarts.map((item, index) => ({
             start: item.time,
             end: index + 1 < sceneStarts.length ? sceneStarts[index + 1].time : duration,
@@ -307,7 +397,7 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
 
         return {
             frames: finalPicked.map((item) => ({ time: item.time, dataUrl: item.frame.dataUrl, scene: item.scene })),
-            meta: { duration, width, height, frameCount: finalPicked.length, sceneCount: sceneStarts.length },
+            meta: { duration, width, height, frameCount: finalPicked.length, sceneCount: sceneStarts.length, cuts: sceneStarts.map((item) => Number(item.time.toFixed(2))) },
         };
     } finally {
         URL.revokeObjectURL(src);

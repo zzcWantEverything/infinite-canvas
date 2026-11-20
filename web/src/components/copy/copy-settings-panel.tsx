@@ -21,11 +21,11 @@ export type CopyGenSettings = {
 export function createCopyGenSettings(config: AiConfig): CopyGenSettings {
     return {
         imageModel: config.imageModel || "",
-        // 爆款复刻基本是竖屏，默认 9:16；分析出片子的真实比例后会被覆盖。
-        imageRatio: "9:16",
+        // 统一默认 16:9（业务口径）；需要竖屏时在面板里改。
+        imageRatio: "16:9",
         imageScale: "1k",
         videoModel: config.videoModel || "",
-        videoRatio: "9:16",
+        videoRatio: "16:9",
         videoResolution: "720",
         // 默认按分镜自己的原片时长，复刻节奏最准；需要统一长度时在面板里改。
         videoSeconds: "auto",

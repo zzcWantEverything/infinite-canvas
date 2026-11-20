@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { CopySettingsPanel, createCopyGenSettings, type CopyGenSettings } from "@/components/copy/copy-settings-panel";
 import { videoModelCapability } from "@/config/video-models";
-import { computeMediaSize, mediaRatioOptions } from "@/lib/media-size";
+import { computeMediaSize } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, groupFramesIntoBatches, mergeBatchAnalyses, sanitizeItemIds, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
@@ -190,6 +190,8 @@ export default function CopyVideoPage() {
                         total: batches.length,
                         startTime: batchFrames[0].time,
                         endTime: batchFrames[batchFrames.length - 1].time,
+                        // 本批范围内的切点：让模型把分镜边界对齐到真实切换点
+                        cuts: (meta.cuts ?? []).filter((time) => time >= batchFrames[0].time - 0.01 && time <= batchFrames[batchFrames.length - 1].time + 0.01),
                         known: result ? { roles: result.roles, scenes: result.scenes, items: result.items } : undefined,
                     });
                 } catch (batchError) {
@@ -206,9 +208,7 @@ export default function CopyVideoPage() {
             setSourceMeta({ sceneCount: meta.sceneCount, frameCount: frames.length });
             // 新的一次分析 → 新的一条历史，之前的记录保持原样。
             syncHistoryId(null);
-            // 分析出的片子比例直接作为生图/生视频的默认比例，避免竖屏素材被生成成横屏。
-            const ratio = (result.ratio || "").trim();
-            if (mediaRatioOptions.some((item) => item.value === ratio)) patchSettings({ imageRatio: ratio, videoRatio: ratio });
+            // 生成比例固定用面板默认（16:9），不再跟随原片比例。
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
             if (e instanceof DOMException && e.name === "AbortError") return;
