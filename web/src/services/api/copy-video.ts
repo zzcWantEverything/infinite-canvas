@@ -432,9 +432,87 @@ function extractJson(text: string): Record<string, unknown> {
     const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
     const candidate = fenced ? fenced[1] : trimmed;
     const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start < 0 || end <= start) throw new Error("模型没有返回可解析的 JSON");
-    return JSON.parse(candidate.slice(start, end + 1));
+    if (start < 0) throw new Error("模型没有返回可解析的 JSON");
+    const body = candidate.slice(start);
+    const parsed = parseJsonLoose(body);
+    if (parsed) return parsed;
+    // 输出被 max_tokens 截断时会给到半截 JSON：把最后一个完整元素之前的括号补齐，
+    // 保住已经写好的角色/分镜，而不是让用户白等两分钟。
+    const repaired = parseJsonLoose(closeUnclosedJson(body));
+    if (repaired) return repaired;
+    throw new Error("模型返回的 JSON 不完整（多半是分镜太多被截断），请缩短视频或减少分镜后重试");
+}
+
+/** 截掉模型在 JSON 后面补的说明文字后再解析；失败返回 null。 */
+function parseJsonLoose(value: string): Record<string, unknown> | null {
+    const end = value.lastIndexOf("}");
+    const attempts = end > 0 && end < value.length - 1 ? [value, value.slice(0, end + 1)] : [value];
+    for (const attempt of attempts) {
+        try {
+            const parsed = JSON.parse(attempt);
+            if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+        } catch {
+            // 试下一种截法
+        }
+    }
+    return null;
+}
+
+/**
+ * 补全被截断的 JSON：找到最后一个**结构上**完整的闭合点，把没闭合的括号补上。
+ * 扫的时候跳过字符串内部——模型写的描述里经常出现 `}`、`]` 这类字符，
+ * 直接按字符串位置截会把它们当成结构。
+ */
+function closeUnclosedJson(value: string): string {
+    const stack: string[] = [];
+    const boundaries: number[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < value.length; index += 1) {
+        const char = value[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === "{" || char === "[") {
+            stack.push(char === "{" ? "}" : "]");
+        } else if (char === "}" || char === "]") {
+            stack.pop();
+            boundaries.push(index + 1);
+        }
+    }
+    // 从后往前试：最后一个闭合点通常就是「截断前最后一个完整元素」。
+    for (let cursor = boundaries.length - 1; cursor >= 0 && cursor >= boundaries.length - 4; cursor -= 1) {
+        const head = value.slice(0, boundaries[cursor]);
+        const closers: string[] = [];
+        let nested = false;
+        let quote = false;
+        let slash = false;
+        for (let index = 0; index < head.length; index += 1) {
+            const char = head[index];
+            if (quote) {
+                if (slash) slash = false;
+                else if (char === "\\") slash = true;
+                else if (char === '"') quote = false;
+                continue;
+            }
+            if (char === '"') quote = true;
+            else if (char === "{") closers.push("}");
+            else if (char === "[") closers.push("]");
+            else if (char === "}" || char === "]") closers.pop();
+            nested = closers.length > 0;
+        }
+        if (!nested) continue;
+        const candidate = head + closers.reverse().join("");
+        if (parseJsonLoose(candidate)) return candidate;
+    }
+    return "";
 }
 
 function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
