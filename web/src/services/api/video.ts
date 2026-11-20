@@ -219,7 +219,10 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     body.append("model", modelOptionName(model));
     body.append("prompt", prompt);
     body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
-    body.append("size", mapVideoSize(normalizeVideoSize(config.size, config.vquality) || "1280x720"));
+    const normalizedSize = normalizeVideoSize(config.size, config.vquality);
+    // size 是唯一能把用户选的横竖屏传给上游的字段（网关插件按它反推 ratio）：
+    // 传空等于交给上游默认值，所以「auto」时不塞兜底尺寸，免得替用户做了横屏决定。
+    if (normalizedSize) body.append("size", mapVideoSize(normalizedSize));
     images.slice(0, maxImages).forEach((file, index) => body.append("input_reference", file, referenceFileName(file, index, "png")));
     if (maxVideos > 0) {
         const videos = await Promise.all((options?.videos || []).slice(0, maxVideos).map((video) => referenceMediaToFile(video, "ref.mp4", "invalidReferenceVideo", options)));
@@ -683,13 +686,24 @@ function resolveVideoMode(mode: string | undefined, imageCount: number) {
     return "frames";
 }
 
+/**
+ * 把请求尺寸收敛到 480/720/1080 三档（miniKey 这类上游只认这几档的短边），
+ * 但**必须保留横竖方向**。
+ *
+ * 之前这里三个分支一律返回竖屏尺寸（480x854 / 720x1280 / 1080x1920），
+ * 用户选 16:9（1280x720）也会被发成 720x1280，网关插件按 16:9 的反比算出 9:16，
+ * 上游就老老实实出了竖屏。2026-11-20 09:08 那条 text_to_video 就是这么变成竖屏的。
+ */
 function mapVideoSize(size: string) {
     const match = size.match(/^(\d+)x(\d+)$/);
-    if (!match) return "1080x1920";
-    const shorter = Math.min(Number(match[1]), Number(match[2]));
-    if (shorter <= 480) return "480x854";
-    if (shorter <= 720) return "720x1280";
-    return "1080x1920";
+    if (!match) return "720x1280";
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!width || !height) return "720x1280";
+    const shortEdgeRaw = Math.min(width, height);
+    const shortEdge = shortEdgeRaw <= 480 ? 480 : shortEdgeRaw <= 720 ? 720 : 1080;
+    const longEdge = Math.round((shortEdge * Math.max(width, height)) / shortEdgeRaw);
+    return width >= height ? `${longEdge}x${shortEdge}` : `${shortEdge}x${longEdge}`;
 }
 
 function normalizeVideoSize(value: string, resolution?: string) {
