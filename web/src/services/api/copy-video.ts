@@ -51,7 +51,7 @@ export type CopyAnalysis = {
     shots: CopyShot[];
 };
 
-export type CopyFrame = { time: number; dataUrl: string };
+export type CopyFrame = { time: number; dataUrl: string; /** 所属场景（镜头）序号，分批分析时用来保证一批不跨太多镜头 */ scene: number };
 
 /** 前端抽帧的硬上限：超过 10 分钟 seek 次数太多，体验不可接受。 */
 export const MAX_VIDEO_SECONDS = 600;
@@ -64,10 +64,40 @@ export type CopyVideoMeta = {
     sceneCount: number;
 };
 
-function analysisPrompt(meta: CopyVideoMeta) {
+export type CopyAnalyzeBatch = {
+    /** 第几批 / 共几批（从 1 开始） */
+    index: number;
+    total: number;
+    /** 本批覆盖的时间范围（秒） */
+    startTime: number;
+    endTime: number;
+    /** 前几批已经定下来的名字，本批必须沿用，避免同一个人被叫成两个名字 */
+    known?: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
+};
+
+function batchContext(batch?: CopyAnalyzeBatch) {
+    if (!batch || batch.total <= 1) return "";
+    const known = batch.known;
+    const list = (items: CopyItem[]) => items.map((item) => `${item.name}（${item.description || "无描述"}）`).join("、");
+    const lines = [
+        "",
+        `【分批说明】这是第 ${batch.index}/${batch.total} 批，宫格里所有格子都落在 ${batch.startTime.toFixed(1)}~${batch.endTime.toFixed(1)} 秒之间。`,
+        "只输出本批时间范围内的分镜，不要重复其他批次的镜头。",
+    ];
+    if (known && (known.roles.length || known.scenes.length || known.items.length)) {
+        lines.push("【已确认清单】前面几批已经定下的对象，本批凡是同一对象必须沿用下面的 name，不要另起新名：");
+        if (known.roles.length) lines.push(`角色：${list(known.roles)}`);
+        if (known.scenes.length) lines.push(`场景：${list(known.scenes)}`);
+        if (known.items.length) lines.push(`物品：${list(known.items)}`);
+        lines.push("本批新出现的角色/场景/物品照常写进对应数组，name 也要简短、可与上面的清单并存。");
+    }
+    return lines.join("\n");
+}
+
+function analysisPrompt(meta: CopyVideoMeta, batch?: CopyAnalyzeBatch) {
     return `你是一名专业的短视频逐镜拆解师，要产出一份可直接用于 AI 视频生成与剪辑复刻的逐镜脚本。
 用户会给出：视频宫格图（每格标了序号和大致时间点）、元数据、以及音轨自动转写的台词。
-
+${batchContext(batch)}
 视频元数据：
 - 时长：${meta.duration.toFixed(1)} 秒
 - 分辨率：${meta.width}x${meta.height}
@@ -215,37 +245,43 @@ export async function extractSceneFrames(file: File, maxFrames = 32, signal?: Ab
             }
             return closest;
         };
-        const pickedTimes: number[] = [];
+        const picked: { time: number; scene: number }[] = [];
         if (scenes.length >= maxFrames) {
             // 场景比帧预算还多：只能每个入选场景各一帧，按时间均匀挑场景，保证覆盖整条时间线。
             for (let i = 0; i < maxFrames; i += 1) {
-                const scene = scenes[Math.round((i * (scenes.length - 1)) / Math.max(1, maxFrames - 1))];
-                pickedTimes.push(frameAt(scene.start).time);
+                const sceneIndex = Math.round((i * (scenes.length - 1)) / Math.max(1, maxFrames - 1));
+                picked.push({ time: frameAt(scenes[sceneIndex].start).time, scene: sceneIndex });
             }
         } else {
             const totalDuration = Math.max(duration, 0.1);
             const extra = maxFrames - scenes.length;
-            scenes.forEach((scene) => {
+            scenes.forEach((scene, sceneIndex) => {
                 const span = Math.max(scene.end - scene.start, 0.01);
                 // 按场景时长占比分额外帧，单个场景最多 4 帧（再多也是同一段画面）
                 const share = Math.min(3, Math.floor((extra * span) / totalDuration + 0.5));
                 const count = 1 + Math.max(0, share);
                 if (count === 1) {
-                    pickedTimes.push(frameAt(scene.start).time);
+                    picked.push({ time: frameAt(scene.start).time, scene: sceneIndex });
                     return;
                 }
                 // 起幅 → … → 收幅：保留镜头开始和结束，中间均匀铺开
                 for (let j = 0; j < count; j += 1) {
                     const ratio = j === count - 1 ? 0.92 : (j / (count - 1)) * 0.5;
-                    pickedTimes.push(frameAt(scene.start + span * ratio).time);
+                    picked.push({ time: frameAt(scene.start + span * ratio).time, scene: sceneIndex });
                 }
             });
         }
-        const uniqueTimes = Array.from(new Set(pickedTimes)).sort((a, b) => a - b).slice(0, maxFrames);
-        const finalPicked = uniqueTimes.map((time) => candidates.find((item) => item.time === time) ?? frameAt(time));
+        const uniqueByTime = new Map<number, { time: number; scene: number }>();
+        picked.forEach((item) => {
+            if (!uniqueByTime.has(item.time)) uniqueByTime.set(item.time, item);
+        });
+        const finalPicked = Array.from(uniqueByTime.values())
+            .sort((a, b) => a.time - b.time)
+            .slice(0, maxFrames)
+            .map((item) => ({ ...item, frame: candidates.find((candidate) => candidate.time === item.time) ?? frameAt(item.time) }));
 
         return {
-            frames: finalPicked.map((item) => ({ time: item.time, dataUrl: item.dataUrl })),
+            frames: finalPicked.map((item) => ({ time: item.time, dataUrl: item.frame.dataUrl, scene: item.scene })),
             meta: { duration, width, height, frameCount: finalPicked.length, sceneCount: sceneStarts.length },
         };
     } finally {
@@ -317,10 +353,18 @@ export async function buildFrameGrid(frames: CopyFrame[], aspect = 16 / 9): Prom
 }
 
 /** 调用多模态模型分析宫格图。sessionToken 必须是后台登录态 token（不是中转 key）。 */
-export async function analyzeVideoGrid(config: AiConfig, gridDataUrl: string, meta: CopyVideoMeta, model: string, sessionToken: string, transcript = "", signal?: AbortSignal): Promise<CopyAnalysis> {
-    const promptText = transcript
-        ? `${analysisPrompt(meta)}\n\n附：视频音轨自动转写的台词（带时间戳，可直接用于分镜的口播/台词字段，注意校正同音字）\n${transcript}`
-        : analysisPrompt(meta);
+export async function analyzeVideoGrid(
+    config: AiConfig,
+    gridDataUrl: string,
+    meta: CopyVideoMeta,
+    model: string,
+    sessionToken: string,
+    transcript = "",
+    signal?: AbortSignal,
+    batch?: CopyAnalyzeBatch,
+): Promise<CopyAnalysis> {
+    const basePrompt = analysisPrompt(meta, batch);
+    const promptText = transcript ? `${basePrompt}\n\n附：视频音轨自动转写的台词（带时间戳，可直接用于分镜的口播/台词字段，注意校正同音字）\n${transcript}` : basePrompt;
     if (!sessionToken.trim()) throw new Error("请先登录后再分析");
     // 走异步任务：长请求会被链路中间代理 120s 掐断，改成「提交 + 轮询」。
     // 用同源相对路径：`/api/user/**` 挂的是 UserAuth，只认后台登录态 token；
@@ -600,4 +644,88 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
         items: toItems(raw.items),
         shots: toShots(raw.shots),
     };
+}
+
+/**
+ * 把关键帧按场景切成若干批：每批最多 maxScenes 个场景、maxFrames 帧。
+ * 一批只覆盖一段连续时间，模型不用在一张图上同时盯十几个镜头，画面也能给得更大。
+ */
+export function groupFramesIntoBatches(frames: CopyFrame[], maxScenes = 10, maxFrames = 16): CopyFrame[][] {
+    const byScene = new Map<number, CopyFrame[]>();
+    for (const frame of frames) {
+        const list = byScene.get(frame.scene) ?? [];
+        list.push(frame);
+        byScene.set(frame.scene, list);
+    }
+    const sceneIds = [...byScene.keys()].sort((a, b) => a - b);
+    const batches: CopyFrame[][] = [];
+    let current: CopyFrame[] = [];
+    let scenesInCurrent = 0;
+    for (const id of sceneIds) {
+        const list = byScene.get(id) ?? [];
+        // 满一批就切：宁可多几批，也不要让单张宫格塞到看不清
+        if (current.length && (current.length + list.length > maxFrames || scenesInCurrent >= maxScenes)) {
+            batches.push(current);
+            current = [];
+            scenesInCurrent = 0;
+        }
+        current.push(...list);
+        scenesInCurrent += 1;
+    }
+    if (current.length) batches.push(current);
+    return batches;
+}
+
+/** 合并多批分析结果：同名的角色/场景/物品只留一条（描述取更完整的），分镜按时间排序去重。 */
+export function mergeBatchAnalyses(results: CopyAnalysis[]): CopyAnalysis {
+    const valid = results.filter(Boolean);
+    if (!valid.length) throw new Error("分析没有返回结果");
+    if (valid.length === 1) return valid[0];
+    const mergeList = (key: "roles" | "scenes" | "items") => {
+        const merged: CopyItem[] = [];
+        const index = new Map<string, number>();
+        for (const result of valid) {
+            for (const item of result[key] ?? []) {
+                const name = String(item.name ?? "").trim();
+                if (!name) continue;
+                const existing = index.get(name);
+                if (existing === undefined) {
+                    index.set(name, merged.length);
+                    merged.push({ ...item, name });
+                } else if ((merged[existing].description ?? "").length < (item.description ?? "").length) {
+                    merged[existing] = { ...merged[existing], description: item.description };
+                }
+            }
+        }
+        return merged;
+    };
+    const seenStarts = new Set<string>();
+    const shots: CopyShot[] = [];
+    for (const result of valid) {
+        for (const shot of result.shots ?? []) {
+            const key = String(shot.start ?? "").trim();
+            if (key && seenStarts.has(key)) continue;
+            if (key) seenStarts.add(key);
+            shots.push(shot);
+        }
+    }
+    shots.sort((a, b) => shotStartSeconds(a.start) - shotStartSeconds(b.start));
+    const stamp = Date.now();
+    return {
+        title: valid.find((result) => result.title)?.title ?? "",
+        ratio: valid.find((result) => result.ratio)?.ratio ?? "",
+        roles: mergeList("roles"),
+        scenes: mergeList("scenes"),
+        items: mergeList("items"),
+        shots: shots.map((shot, index) => ({ ...shot, id: `shot-${stamp}-${index}` })),
+    };
+}
+
+/** 时间码归一成秒：支持 "1:02.4"、"12.5秒"、"0.0秒"。 */
+function shotStartSeconds(value: string) {
+    const text = String(value ?? "").trim();
+    const clock = text.match(/(\d+):(\d+(?:\.\d+)?)/);
+    if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+    const numeric = Number(text.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(numeric) ? numeric : 0;
 }

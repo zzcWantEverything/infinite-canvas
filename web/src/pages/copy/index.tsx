@@ -7,7 +7,7 @@ import { CopySettingsPanel, createCopyGenSettings, type CopyGenSettings } from "
 import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize, mediaRatioOptions } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, groupFramesIntoBatches, mergeBatchAnalyses, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
 import { awaitCloudUploads, serializeDoc } from "@/services/canvas-cloud";
 import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
@@ -165,8 +165,6 @@ export default function CopyVideoPage() {
             setProgress(t("copyVideo.extracting"));
             const { frames, meta } = await extractSceneFrames(file, 32);
             setProgress(t("copyVideo.gridding", { frames: frames.length, scenes: meta.sceneCount }));
-            // 按视频真实比例排版：竖屏不再被塞进 16:9 的格子留两条黑边。
-            const grid = await buildFrameGrid(frames, meta.width / meta.height);
             // 音轨转写（失败降级为无台词，不阻塞分析）
             setProgress(t("copyVideo.transcribing"));
             let transcript = "";
@@ -176,8 +174,36 @@ export default function CopyVideoPage() {
             } catch {
                 transcript = "";
             }
-            setProgress(t("copyVideo.analyzing"));
-            const result = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, sessionToken, transcript);
+            // 按场景分批：每批 6 个镜头 / 9 帧，宫格能画得更大，模型也不用同时盯整条时间线。
+            // 串行是有意的——后一批要吃前一批定下的角色/场景名字，并行就会各叫各的。
+            const batches = groupFramesIntoBatches(frames);
+            let result: CopyAnalysis | null = null;
+            for (let index = 0; index < batches.length; index += 1) {
+                setProgress(
+                    batches.length > 1
+                        ? t("copyVideo.analyzingBatch", { current: index + 1, total: batches.length })
+                        : t("copyVideo.analyzing"),
+                );
+                const batchFrames = batches[index];
+                const grid = await buildFrameGrid(batchFrames, meta.width / meta.height);
+                let partial: CopyAnalysis;
+                try {
+                    partial = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, sessionToken, transcript, undefined, {
+                        index: index + 1,
+                        total: batches.length,
+                        startTime: batchFrames[0].time,
+                        endTime: batchFrames[batchFrames.length - 1].time,
+                        known: result ? { roles: result.roles, scenes: result.scenes, items: result.items } : undefined,
+                    });
+                } catch (batchError) {
+                    // 已经拿到部分结果就别整单作废：后面几批失败时提示一句，保住前面分析好的镜头。
+                    if (!result) throw batchError;
+                    message.warning(t("copyVideo.batchPartial", { current: index + 1, total: batches.length }));
+                    break;
+                }
+                result = result ? mergeBatchAnalyses([result, partial]) : partial;
+            }
+            if (!result) throw new Error(t("copyVideo.analyzeFailed"));
             setAnalysis(result);
             setSourceMeta({ sceneCount: meta.sceneCount, frameCount: frames.length });
             // 新的一次分析 → 新的一条历史，之前的记录保持原样。

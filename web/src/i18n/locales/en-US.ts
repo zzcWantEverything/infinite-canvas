@@ -388,6 +388,8 @@ export default {
         extracting: "Extracting frames…",
         gridding: "Building grid ({{frames}} frames, {{scenes}} scene cuts)…",
         transcribing: "Transcribing audio…",
+        batchPartial: "Batch {{current}} of {{total}} failed; earlier batches were kept — re-run analysis to fill the rest",
+        analyzingBatch: "Analyzing… (batch {{current}} of {{total}})",
         analyzing: "Analyzing…",
         analyzed: "Analysis finished",
         analyzeFailed: "Analysis failed, please retry",

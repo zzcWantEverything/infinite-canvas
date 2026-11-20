@@ -388,6 +388,8 @@ export default {
         extracting: "抽帧中…",
         gridding: "拼图中（{{frames}} 帧，{{scenes}} 个场景切换）…",
         transcribing: "转写台词中…",
+        batchPartial: "第 {{current}}/{{total}} 批分析失败，已保留前面几批的结果，可稍后重新分析补齐",
+        analyzingBatch: "分析中…（第 {{current}}/{{total}} 批）",
         analyzing: "分析中…",
         analyzed: "分析完成",
         analyzeFailed: "分析失败，请重试",
