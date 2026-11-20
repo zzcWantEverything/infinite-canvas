@@ -7,7 +7,7 @@ import { CopySettingsPanel, createCopyGenSettings, type CopyGenSettings } from "
 import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize, mediaRatioOptions } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, groupFramesIntoBatches, mergeBatchAnalyses, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
+import { analyzeVideoGrid, buildFrameGrid, extractAudioWav, extractSceneFrames, generateItemImage, generateShotVideo, groupFramesIntoBatches, mergeBatchAnalyses, sanitizeItemIds, transcribeAudio, type CopyAnalysis, type CopyItem, type CopyShot } from "@/services/api/copy-video";
 import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
 import { awaitCloudUploads, serializeDoc } from "@/services/canvas-cloud";
 import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
@@ -457,11 +457,20 @@ export default function CopyVideoPage() {
                 source?: { sceneCount?: number; frameCount?: number } | null;
             };
             if (!doc.analysis) throw new Error(t("copyVideo.historyBroken"));
-            setAnalysis(doc.analysis);
+            // 老记录的 id 可能是撞车的（三个分区共用 `item-<stamp>-<index>`），载入时统一重写，
+            // 素材表按映射跟着搬，否则一张图会同时出现在角色/场景/物品里。
+            const sanitized = sanitizeItemIds(doc.analysis);
+            setAnalysis(sanitized.analysis);
             setSourceMeta(doc.source ?? null);
             if (doc.settings) setGenSettings({ ...createCopyGenSettings(config), ...doc.settings });
-            setItemImages(await resolveMediaMap(doc.itemImages));
-            setShotVideos(await resolveMediaMap(doc.shotVideos));
+            const remapMedia = async (map?: Record<string, CopyMedia>) => {
+                const moved: Record<string, CopyMedia> = {};
+                const resolved = await resolveMediaMap(map);
+                for (const [oldId, media] of Object.entries(resolved)) moved[sanitized.remap[oldId] ?? oldId] = media;
+                return moved;
+            };
+            setItemImages(await remapMedia(doc.itemImages));
+            setShotVideos(await remapMedia(doc.shotVideos));
             setItemStatus({});
             setShotStatus({});
             setError("");

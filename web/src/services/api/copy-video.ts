@@ -750,3 +750,35 @@ function shotStartSeconds(value: string) {
     const numeric = Number(text.replace(/[^0-9.]/g, ""));
     return Number.isFinite(numeric) ? numeric : 0;
 }
+
+/**
+ * 修复早期数据里的 id 撞车：那时 roles/scenes/items 都用 `item-<stamp>-<index>`，
+ * 三个分区的第 0 项是同一个 id，生成一张图会同时显示在三个地方，批量生成还会互相覆盖。
+ *
+ * 载入历史记录时跑一次：按分区重写 id，并给出「老 id → 新 id」的映射，
+ * 素材表跟着迁移。同一个老 id 被多个分区占用的，图归第一个占用者（角色 → 场景 → 物品）。
+ */
+export function sanitizeItemIds(analysis: CopyAnalysis): { analysis: CopyAnalysis; remap: Record<string, string> } {
+    const stamp = Date.now();
+    const claimed = new Set<string>();
+    const remap: Record<string, string> = {};
+    const fix = (list: CopyItem[], section: "roles" | "scenes" | "items") =>
+        list.map((item, index) => {
+            const oldId = String(item.id ?? "");
+            const newId = `${section}-${stamp}-${index}`;
+            if (oldId) {
+                if (!claimed.has(oldId) && remap[oldId] === undefined) remap[oldId] = newId;
+                claimed.add(oldId);
+            }
+            return { ...item, id: newId };
+        });
+    return {
+        analysis: {
+            ...analysis,
+            roles: fix(analysis.roles ?? [], "roles"),
+            scenes: fix(analysis.scenes ?? [], "scenes"),
+            items: fix(analysis.items ?? [], "items"),
+        },
+        remap,
+    };
+}
