@@ -22,6 +22,17 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
 }
 
+
+/**
+ * 把一份已经存在本地的 blob 补传云端（导入画布时用）。
+ * 导入只把素材写进 IndexedDB，不补传的话文档里永远存成本地键，换设备就是空白。
+ */
+export async function syncStoredBlob(storageKey: string, blob: Blob) {
+    const prefix = storageKey.split(":")[0] || "file";
+    const meta = blob.type.startsWith("video/") ? await readVideoMeta(URL.createObjectURL(blob)) : {};
+    trackCloudUpload(syncMediaToCloud(storageKey, blob, prefix, meta));
+}
+
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
     // 云端对象键：换设备加载后 doc 里的 storageKey 直接就是 objectKey。

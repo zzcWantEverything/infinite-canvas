@@ -5,7 +5,7 @@ import { Download, FileUp, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { readZip } from "@/lib/zip";
-import { pullCloudToLocal } from "@/services/canvas-cloud-sync";
+import { pullCloudToLocal, pushProjectToCloud, uploadImportedAssets } from "@/services/canvas-cloud-sync";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
@@ -55,7 +55,14 @@ export default function CanvasPage() {
                     }),
                 ),
             );
-            data.projects.forEach((item) => importProject(item.project));
+            // 素材先补传云端：文档里的本地键要能换成 object_key，否则换设备打开是空白
+            await uploadImportedAssets(data.projects.flatMap((item) => item.files.map((file) => file.storageKey)));
+            const importedIds = data.projects.map((item) => importProject(item.project));
+            // 导入的项目只在本地，推一次云才会进账号的画布列表
+            importedIds.forEach((id) => {
+                const project = useCanvasStore.getState().openProject(id);
+                if (project) void pushProjectToCloud(project);
+            });
             message.success(t("canvas.imported", { count: data.projects.length }));
         } catch {
             message.error(t("canvas.importFailed"));

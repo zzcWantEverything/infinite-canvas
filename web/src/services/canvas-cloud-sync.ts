@@ -1,5 +1,7 @@
 import localforage from "localforage";
 
+import { getImageBlob } from "@/services/image-storage";
+import { getMediaBlob, syncStoredBlob } from "@/services/file-storage";
 import { awaitCloudUploads, createCloudProject, getCloudProject, isCloudEnabled, listCloudProjects, repairCloudProjectMediaKeys, saveCloudProject, serializeDoc, type CloudProject } from "@/services/canvas-cloud";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -115,4 +117,17 @@ export async function repairProjectMediaKeysByLocalId(localId: string): Promise<
     const link = await getLink(localId);
     if (!link) return;
     await repairCloudProjectMediaKeys(link.cloudId).catch(() => false);
+}
+
+/** 导入画布后，把 zip 里的素材补传云端；返回时上传已落地，可以安全推送文档。 */
+export async function uploadImportedAssets(storageKeys: string[]) {
+    if (!isCloudEnabled()) return;
+    await Promise.all(
+        [...new Set(storageKeys)].map(async (key) => {
+            if (!key || key.startsWith("media/")) return;
+            const blob = key.startsWith("image:") ? await getImageBlob(key) : await getMediaBlob(key);
+            if (blob) await syncStoredBlob(key, blob);
+        }),
+    );
+    await awaitCloudUploads();
 }

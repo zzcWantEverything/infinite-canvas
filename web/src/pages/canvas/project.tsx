@@ -277,6 +277,8 @@ function InfiniteCanvasPage() {
     const forceCloudPushRef = useRef(false);
     const applyingHistoryRef = useRef(false);
     const historyPausedRef = useRef(false);
+    // 上次成功排推送的时间：防抖会被高频节点更新（任务轮询）无限重置，这里兜一个 10 秒上限
+    const lastCloudPushAtRef = useRef(0);
     const didInitialCenterRef = useRef(false);
     const rafRef = useRef<number | null>(null);
     const nodeDraggingRef = useRef(false);
@@ -688,13 +690,24 @@ function InfiniteCanvasPage() {
         if (cloudPushTimerRef.current) clearTimeout(cloudPushTimerRef.current);
         if (forcePush) {
             cloudPushTimerRef.current = null;
+            lastCloudPushAtRef.current = Date.now();
             const project = useCanvasStore.getState().openProject(projectId);
             if (project) void pushProjectToCloud(project);
             return;
         }
         // 云端保存防抖 1.5s：等用户停手再推，避免每个节点拖一下都打一次接口。
+        // 但不能无限等：视频任务轮询会让 nodes 每 1~2 秒变一次，防抖永远等不到空闲，
+        // 期间一次都不保存，用户刷新就丢内容。所以超过 10 秒没推过就立刻推一次。
+        const now = Date.now();
+        if (now - lastCloudPushAtRef.current >= 10000) {
+            lastCloudPushAtRef.current = now;
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (project) void pushProjectToCloud(project);
+            return;
+        }
         cloudPushTimerRef.current = setTimeout(() => {
             cloudPushTimerRef.current = null;
+            lastCloudPushAtRef.current = Date.now();
             const project = useCanvasStore.getState().openProject(projectId);
             if (project) void pushProjectToCloud(project);
         }, 1500);
