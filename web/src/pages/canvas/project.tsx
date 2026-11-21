@@ -280,6 +280,8 @@ function InfiniteCanvasPage() {
     const historyPausedRef = useRef(false);
     // 上次成功排推送的时间：防抖会被高频节点更新（任务轮询）无限重置，这里兜一个 10 秒上限
     const lastCloudPushAtRef = useRef(0);
+    // 视频「任务已完成、文件下载失败」的自动重试计数：nodeId → { 次数, 下次可试时间 }
+    const mediaRetryRef = useRef(new Map<string, { count: number; nextAt: number }>());
     const didInitialCenterRef = useRef(false);
     const rafRef = useRef<number | null>(null);
     const nodeDraggingRef = useRef(false);
@@ -501,7 +503,7 @@ function InfiniteCanvasPage() {
      * 点下去等于什么都没发生。这里改成一次性查询，并明确告诉用户查到什么。
      */
     const queryVideoNodeTask = useCallback(
-        async (node: CanvasNodeData) => {
+        async (node: CanvasNodeData, silent = false) => {
             const taskId = node.metadata?.videoTaskId;
             if (!taskId) return;
             const generationConfig = buildGenerationConfig(effectiveConfig, node, "video");
@@ -529,7 +531,7 @@ function InfiniteCanvasPage() {
                                 : item,
                         ),
                     );
-                    message.success(t("canvas.node.queryTaskDone"));
+                    if (!silent) message.success(t("canvas.node.queryTaskDone"));
                     return;
                 }
                 if (state.status === "failed") {
@@ -541,18 +543,50 @@ function InfiniteCanvasPage() {
                 if (state.status === "media_pending") {
                     // 上游任务已成功，只是文件还在下载（网络拥堵）：保持「获取中」，让用户再点一次重试。
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_PENDING, errorDetails: state.error, mediaPending: true } } : item)));
-                    message.info(state.error);
+                    if (!silent) message.info(state.error);
                     return;
                 }
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_PENDING, errorDetails: undefined } } : item)));
-                message.info(t("canvas.node.queryTaskStillRunning"));
+                if (!silent) message.info(t("canvas.node.queryTaskStillRunning"));
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
-                message.error(error instanceof Error ? error.message : t("canvas.node.queryTaskFailed"));
+                if (!silent) message.error(error instanceof Error ? error.message : t("canvas.node.queryTaskFailed"));
             }
         },
         [effectiveConfig, isAiConfigReady, message, openConfigDialog, setNodes, t],
     );
+
+    /**
+     * 「视频已生成，网络拥堵，正在获取视频文件，稍后会自动重试」这句文案以前是空头支票：
+     * 只打了 mediaPending 标记，没有任何重试代码。这里补上真正的自动重试：
+     * 每 12 秒扫一次持有 videoTaskId 的 mediaPending 节点，指数退避最多试 5 次。
+     */
+    useEffect(() => {
+        if (!projectLoaded) return;
+        const MAX_ATTEMPTS = 5;
+        const tick = () => {
+            const now = Date.now();
+            nodesRef.current.forEach((node) => {
+                if (!node.metadata?.mediaPending || !node.metadata?.videoTaskId) return;
+                const state = mediaRetryRef.current.get(node.id) ?? { count: 0, nextAt: 0 };
+                if (state.count >= MAX_ATTEMPTS || now < state.nextAt) return;
+                // 退避：8s → 16s → 32s → 64s → 128s
+                const nextCount = state.count + 1;
+                mediaRetryRef.current.set(node.id, { count: nextCount, nextAt: now + Math.min(180000, 8000 * 2 ** state.count) });
+                void queryVideoNodeTask(node, true);
+                if (nextCount >= MAX_ATTEMPTS) {
+                    // 试到头了就把话说清楚，别一直挂着「正在重试」
+                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, errorDetails: t("canvas.node.mediaRetryExhausted") } } : item)));
+                }
+            });
+        };
+        const first = window.setTimeout(tick, 3000);
+        const timer = window.setInterval(tick, 12000);
+        return () => {
+            window.clearTimeout(first);
+            window.clearInterval(timer);
+        };
+    }, [projectLoaded, queryVideoNodeTask, setNodes, t]);
 
     const stopGenerationByRunningId = useCallback((runningId: string) => {
         const affectedNodeIds = new Set<string>();
