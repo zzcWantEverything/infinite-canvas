@@ -5,6 +5,7 @@ import { getMediaBlob, syncStoredBlob } from "@/services/file-storage";
 import { awaitCloudUploads, createCloudProject, getCloudProject, isCloudEnabled, listCloudProjects, repairCloudProjectMediaKeys, saveCloudProject, serializeDoc, type CloudProject } from "@/services/canvas-cloud";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useCanvasSyncStore } from "@/stores/canvas/use-canvas-sync-store";
 
 /**
  * 画布文档的云端同步。
@@ -52,6 +53,8 @@ function cloudToLocal(cloud: CloudProject, id: string): CanvasProject {
 /** 把单个本地画布推到云端；首次推送自动在云端建项目并记录映射。 */
 export async function pushProjectToCloud(project: CanvasProject) {
     if (!isCloudEnabled()) return;
+    const sync = useCanvasSyncStore.getState();
+    sync.setSaving();
     try {
         let link = await getLink(project.id);
         if (!link) {
@@ -73,8 +76,11 @@ export async function pushProjectToCloud(project: CanvasProject) {
         } else if (res.project) {
             await setLink(project.id, { cloudId: link.cloudId, revision: res.project.revision });
         }
-    } catch {
-        // 失败静默：本地已有副本，下次编辑再重试。
+        useCanvasSyncStore.getState().setSaved();
+    } catch (error) {
+        // 保存失败必须让人看见：以前这里静默吞掉，用户以为存上了，刷新才发现内容全丢。
+        const message = error instanceof Error ? error.message : "保存失败";
+        useCanvasSyncStore.getState().setError(message);
     }
 }
 

@@ -12,6 +12,7 @@ import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-
 import { ensureImagePreview, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { pushProjectToCloud, repairProjectMediaKeysByLocalId } from "@/services/canvas-cloud-sync";
+import { useCanvasSyncStore } from "@/stores/canvas/use-canvas-sync-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -337,6 +338,8 @@ function InfiniteCanvasPage() {
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [projectLoaded, setProjectLoaded] = useState(false);
+    const syncStatus = useCanvasSyncStore((state) => state.status);
+    const syncError = useCanvasSyncStore((state) => state.error);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
@@ -682,7 +685,9 @@ function InfiniteCanvasPage() {
     }, [activeChatId, backgroundMode, chatSessions, connections, createHistoryEntry, nodes, projectLoaded, showImageInfo]);
 
     useEffect(() => {
-        if (!projectLoaded || historyPausedRef.current) return;
+        // 注意：这里不看 historyPausedRef。那个标记是给「撤销历史」用的，
+        // 早前顺手加在保存上，一旦拖拽没正常收尾就会永久阻断云端保存。
+        if (!projectLoaded) return;
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo });
         // 视频任务刚拿到 taskId：立刻推一次云，别让 id 卡在防抖窗口里。
         const forcePush = forceCloudPushRef.current;
@@ -3363,6 +3368,21 @@ function InfiniteCanvasPage() {
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
+                {syncStatus === "error" ? (
+                    <div className="absolute bottom-4 right-4 z-50 flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 shadow-sm dark:border-rose-900/60 dark:bg-rose-950/70 dark:text-rose-300">
+                        <span title={syncError}>{t("canvas.syncFailed")}</span>
+                        <button
+                            type="button"
+                            className="rounded-full px-2 py-0.5 font-medium underline-offset-2 hover:underline"
+                            onClick={() => {
+                                const project = useCanvasStore.getState().openProject(projectId);
+                                if (project) void pushProjectToCloud(project);
+                            }}
+                        >
+                            {t("canvas.syncRetry")}
+                        </button>
+                    </div>
+                ) : null}
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}

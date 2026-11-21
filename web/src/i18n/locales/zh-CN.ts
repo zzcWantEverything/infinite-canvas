@@ -259,6 +259,8 @@ export default {
         defaultTitle: "画柚 {{count}}",
         library: "画布库",
         title: "画柚",
+        syncFailed: "未同步到云端",
+        syncRetry: "重试",
         imported: "已导入 {{count}} 个画布",
         importFailed: "导入失败，请选择有效的画布压缩包",
         opening: "正在打开画布...",

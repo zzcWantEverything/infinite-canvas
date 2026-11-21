@@ -259,6 +259,8 @@ export default {
         defaultTitle: "画柚 {{count}}",
         library: "Canvas library",
         title: "画柚",
+        syncFailed: "Not synced to cloud",
+        syncRetry: "Retry",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
         opening: "Opening canvas...",
