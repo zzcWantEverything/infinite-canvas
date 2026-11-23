@@ -78,13 +78,15 @@ cd web && npx prettier --check <file>
 ## 爆款转绘 /copy（2026-11-18）
 
 - **入口**：侧栏「复刻视频」（`slug: "copy"`，`constant/navigation-tools.ts`）+ 路由 `/copy`。
-  **线上默认隐藏**：`app-side-nav.tsx` 与 `mobile-nav-drawer.tsx` 在渲染前用
-  `navigationTools.filter((tool) => import.meta.env.DEV || tool.slug !== "copy")` 过滤；路由保留，dev 直接访问 `/copy`。
+  **2026-11-19 起线上常显**：去掉了 `import.meta.env.DEV` 过滤，侧栏与移动抽屉直接 `navigationTools.map`。
 - **流程**（`pages/copy/index.tsx` + `services/api/copy-video.ts`）：
   1. 上传视频（≤150MB，**≤10 分钟**，超时直接拒绝）
-  2. `extractSceneFrames`：纯 canvas 场景检测——0.4s/1s/2s 动态步长采样 64x36 缩略图算像素差，阈值 0.06 判镜头切换，
-     每个场景区间抽 3~4 帧、上限 **32 帧**（每帧 640 长边）
-  3. `buildFrameGrid`：4 列宫格 200x112/格、标 `#序号 时间`，整图 800x896 **控制在 1024 内避免模型降采样**
+  2. `extractSceneFrames`：纯 canvas 场景检测——采样步长 ≤60s **0.2s** / ≤5min 0.5s / 其余 1s；切点 =
+     16 档直方图差分 + 逐像素差分（硬切 `pixel≥0.1 || hist≥0.3`，叠化看连续 ≥3 个软信号）；
+     **选帧 = 每秒一帧 + 末帧 + 每个切点首帧**，上限 32 帧（每帧 640 长边）
+  3. `buildFrameGrid`：按视频真实比例排版（1400×1568 预算内选单格面积最大的列数），标 `#序号 时间`；
+     横屏 32 帧≈4 列 316×177，竖屏≈8 列 175×311（之前固定 200×112 的 16:9 格，竖屏白丢一半像素）
+  3.5 `groupFramesIntoBatches`：按场景分批（≤10 镜 / ≤16 帧），串行请求，后一批带「已确认清单」；`mergeBatchAnalyses` 合并
   4. `extractAudioWav`：`AudioContext.decodeAudioData` + `OfflineAudioContext` 重采样 16kHz 单声道、手写 WAV 编码
      （**不装 ffmpeg**；HEVC/AC3 等浏览器不认的编码返回 null 降级）
   5. `transcribeAudio`：调 new-api `POST /api/user/copy/transcribe`（腾讯云 ASR 代理，**用 session token 不是渠道 apiKey**），拿带时间戳台词
@@ -98,3 +100,18 @@ cd web && npx prettier --check <file>
   `app-top-nav` 不再渲染 `AppConfigModal`、SSO 导入后不再弹配置、首页灵感空态的「去配置」按钮移除。
   `pages/config` 文件保留（恢复只需改回路由）。
 - **灵感广场已移除**：首页不再拉 `fetchPrompts`，只保留创作入口（标题+输入框+模式切换+建议词）。
+
+## /copy 与云同步的坑（2026-11-20 ~ 11-21）
+
+- **item id 必须带分区前缀**：`normalizeAnalysis` 里 `toItems` 对 roles/scenes/items 各调一次，
+  用 `item-<stamp>-<index>` 会让三个分区的第 0 项同 id → 一张图同时显示在三处、批量生图互相覆盖。
+  现为 `${section}-${stamp}-${index}`；老历史记录载入时走 `sanitizeItemIds()` 重写 + 素材键迁移。
+- **云端保存有两个静默失败点**：`pushProjectToCloud` 的 `catch {}` 吞掉所有错误（现在写 `useCanvasSyncStore`，
+  画布右下角显示「未同步到云端 · 重试」）；1.5s 防抖会被视频任务轮询（1~2 秒一次节点更新）无限重置
+  （现在 `lastCloudPushAtRef` 兜底，10 秒必推一次）。
+- **保存 effect 不能看 `historyPausedRef`**：那是撤销历史的标记，拖拽没收尾会永久 true，导致保存全程 no-op。
+- **导入画布要补传素材**：zip 里只有本地键，`importCanvas` 必须 `uploadImportedAssets()` → `importProject()`
+  → `pushProjectToCloud()`，顺序不能反（serializeDoc 要先拿得到 object_key）。
+- **mediaPending 文案曾撒谎**：`videoMediaPending` 写着「稍后自动重试」但没有重试代码，
+  现在每 12 秒扫一次、指数退避最多 5 次，耗尽后改提示让用户手点「查询进度」。
+- 生成比例默认 **16:9**（图片/视频都是），分析完不再用原片比例覆盖。
