@@ -12,6 +12,8 @@ export type CopyItem = {
     id: string;
     name: string;
     description: string;
+    /** 角色声线设定（性别、声音年龄、音色、语言/方言、基础语速），只给角色用 */
+    voice?: string;
 };
 
 export type CopyShot = {
@@ -20,6 +22,8 @@ export type CopyShot = {
     start: string;
     end: string;
     duration: string;
+    /** 可直接出片的视频提示词：整段范围 + 逐节拍时间线（分析产物，可编辑） */
+    videoPrompt: string;
     /** 景别：特写 / 近景 / 中景 / 全景 / 远景 */
     shotSize: string;
     /** 机位与角度 */
@@ -135,17 +139,32 @@ export type CopyVideoMeta = {
     cuts?: number[];
 };
 
-export type CopyAnalyzeBatch = {
-    /** 第几批 / 共几批（从 1 开始） */
+export type CopyOutlineUnit = { start: string; end: string; summary: string; roles: string[]; scenes: string[]; items: string[] };
+
+/** 第一步（全局）的产物：资产表 + 分镜大纲 + 全片风格。第二步每个时间窗都以它为「已锁定资产」。 */
+export type CopyOverview = {
+    title: string;
+    ratio: string;
+    style: string;
+    roles: CopyItem[];
+    scenes: CopyItem[];
+    items: CopyItem[];
+    outline: CopyOutlineUnit[];
+};
+
+export type CopyWindowContext = {
     index: number;
     total: number;
-    /** 本批覆盖的时间范围（秒） */
     startTime: number;
     endTime: number;
-    /** 本批范围内的切点时间（秒） */
+    /** 本窗范围内的切点时间（秒） */
     cuts?: number[];
-    /** 前几批已经定下来的名字，本批必须沿用，避免同一个人被叫成两个名字 */
-    known?: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
+    /** 第一步锁定的资产表 */
+    casting: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
+    /** 本窗内的台词（带时间戳，原样使用） */
+    transcript: string;
+    /** 上一窗最后一个单元的收尾状态，用来做连续性 */
+    previousEndState?: string;
 };
 
 /** 切点列表转成提示词里的短串：太多就折叠，避免把提示词撑长。 */
@@ -156,117 +175,119 @@ function formatCuts(cuts: number[] | undefined, max = 40) {
     return list.join("、");
 }
 
-function batchContext(batch?: CopyAnalyzeBatch) {
-    if (!batch || batch.total <= 1) return "";
-    const known = batch.known;
-    const list = (items: CopyItem[]) => items.map((item) => `${item.name}（${item.description || "无描述"}）`).join("、");
-    const lines = [
-        "",
-        `【分批说明】这是第 ${batch.index}/${batch.total} 批，宫格里所有格子都落在 ${batch.startTime.toFixed(1)}~${batch.endTime.toFixed(1)} 秒之间。`,
-        "只输出本批时间范围内的分镜，不要重复其他批次的镜头。",
-    ];
-    if (batch.cuts && batch.cuts.length) {
-        lines.push(`本批检测到 ${batch.cuts.length} 处切点：${formatCuts(batch.cuts)}。分镜边界要对齐这些切点。`);
-    }
-    if (known && (known.roles.length || known.scenes.length || known.items.length)) {
-        lines.push("【已确认清单】前面几批已经定下的对象，本批凡是同一对象必须沿用下面的 name，不要另起新名：");
-        if (known.roles.length) lines.push(`角色：${list(known.roles)}`);
-        if (known.scenes.length) lines.push(`场景：${list(known.scenes)}`);
-        if (known.items.length) lines.push(`物品：${list(known.items)}`);
-        lines.push("本批新出现的角色/场景/物品照常写进对应数组，name 也要简短、可与上面的清单并存。");
-    }
-    return lines.join("\n");
-}
+const castingLine = (items: CopyItem[]) => items.map((item) => `${item.name}（${item.description || "无描述"}${item.voice ? `；声线：${item.voice}` : ""}）`).join("、");
 
-function analysisPrompt(meta: CopyVideoMeta, batch?: CopyAnalyzeBatch) {
-    return `你是一名专业的短视频逐镜拆解师。请完整分析我上传的参考视频宫格，从第一帧拆到最后一帧，输出一份可直接用于 AI 视频生成和剪辑复刻的逐镜脚本。
+/** 导演规则：从《AI影视动态分镜生成系统 V2.0》收敛成模型能直接执行的一段。 */
+const directingRules = `【导演规则】
+1. 单元与节拍：一条分镜=一次视频生成任务出片的单位，5~15 秒；对白密集 5~8 秒，动作/空镜可 10~15 秒。
+   原片里的硬切、反打、推拉、台词切换都写进同一单元的节拍里，不要一个切点开一个单元。
+   先按台词实际发音时长、呼吸停顿和表演需要定节拍，再让各节拍首尾相接、不重叠、不留空档，总和必须等于单元时长。
+   台词不得删减、改写、重复；一句话跨节拍时只写一次，后续节拍写「承接上一拍」。
+2. 资产绑定：正文一律用 @资产名 引用，名称与资产表完全一致；已绑定资产不得重新设计五官、年龄、体型、发型、服装与道具外观；禁止凭空增加不存在的人物、场景、道具。
+3. 摄影：写清景别、机位高度、拍摄角度、焦段、对焦主体与构图；运动写起始位置、方向、速度、轨迹与停留点；遵守 180° 轴线、视线匹配、动作匹配。不为炫技加运镜。
+4. 表演：按「心理动机→眼神落点→微表情→呼吸→身体重心→肢体动作→情绪结果」写；倾听者有真实且带时间差的反应，不抢戏；不无故瞪眼、机械点头、突然变情绪。
+5. 声音：每个声音事件标注类型——DIALOGUE（现场对白）/ NARRATION（画外旁白）/ INNER_MONOLOGUE（内心独白）/ OFFSCREEN_DIALOGUE（画外对白）/ DEVICE_VOICE（电话广播等设备声）/ ENVIRONMENT（环境声）/ SFX（动作音效）/ SILENT（纯表演）。
+   口型权限只给实际说话者，其他人不得跟读张嘴；旁白是独立声轨，不归属画面人物；不得因镜头切换重复播放或改发声者；未指定不加背景音乐、不加字幕。
+6. 连续性与物理：承接上一单元的结束状态（站位、姿态、道具位置、声音）；动作有起始、过程、结束；不得物品突变、左右手互换、位置重置。
+7. 画面质感：统一光源方向、色温、曝光、接触阴影；不做塑料感、磨皮、悬浮、畸形。`;
+
+/** 第一步：稀疏宫格 → 资产表 + 分镜大纲。 */
+function overviewPrompt(meta: CopyVideoMeta, transcript: string) {
+    return `你是一名电影导演、摄影指导和分镜设计师。这是分镜分析的第一步：只看全片稀疏宫格，建立资产表和分镜大纲，不要写逐镜细节。
 
 视频元数据：
 - 时长：${meta.duration.toFixed(1)} 秒
 - 分辨率：${meta.width}x${meta.height}
-- 抽帧：${meta.frameCount} 格（已按画面差异挑选，共 ${meta.sceneCount} 个场景切换）
-- 输入是宫格图，每格标了序号和它所属的时间点；格子是降采样缩略图，细节本来就有限。
-${meta.cuts && meta.cuts.length ? `- 已检测到的切点：${formatCuts(meta.cuts)}` : ""}
-${batchContext(batch)}
+- 格数：${meta.frameCount}（按时长均匀抽取，不是每一秒都有一格）
+- 每格标了序号和时间点；格子在时间线上分布均匀，短镜头可能没有独立格子。
 
-一、按原片切点逐镜拆解
-1. 先给出原片比例和总时长（写进 ratio 和 title 字段）。
-2. 每次硬切、机位变化或明显转场都单独编号。极短的产品特写、手部动作、人物反应镜头也要保留。
-   上面列出的「已检测到切点」是硬切/转场的时间点：每个切点都要开启一个新的分镜，起止时间与它对齐。
-   如果画面里还有明显切换但没被列出（叠化、快速运动），按画面自己补一个分镜。
-3. 时间码精确到 0.1 秒，统一写成 "12.3秒" 这种格式。
-4. 每 30 秒划一组，用 group 字段标组号（从 1 开始），最后一组按实际时长写。跨组镜头保留原切点和连续动作，台词只录一次。
+一、资产表
+- roles：每个出场人物一条。description 写外观、年龄、体型、发型、服装、配饰、气质（用于生图，不要写声音）；voice 写性别、声音年龄、音色、音高、共鸣位置、语言/方言、基础语速（用于配音，不要写外观）。
+- scenes：每个实际使用的场景一条，写地点、时间、天气、光线、环境布置、关键陈设。
+- items：会推动剧情的道具一条，写外观、材质、颜色、状态。
+- name 简短唯一；全片同一对象只允许一个 name。不得编写画面里没有出现的人物/场景/道具。
 
-二、每镜按这个顺序写（对应到 JSON 字段）
-镜头编号｜起止时间｜时长｜景别｜机位和角度｜镜头运动
-→ shots 数组的顺序就是镜头编号；分别写进 start / end / duration / shotSize / cameraAngle / cameraMove。
-画面 → description：写清第一帧是什么，人物在画面左、中、右哪个位置，身体朝哪，谁拿着什么，前景和背景有哪些物件，镜头结束时动作停在哪里。
-表演 → performance：写具体动作及发生顺序，注明视线落点、手势、呼吸停顿、表情变化，以及哪个动作落在哪个词上。
-声音 → sound：区分人物开口、画外旁白、环境声和操作音效，记录说话人和起止位置，保留原句顺序、数字、语气词和实际停顿。
+二、分镜大纲（outline）
+- 按「一次生视频出片」的单元切分：每单元 5~15 秒，单元数量 ≈ 总时长 ÷ 10（上下浮动 2 个）。
+- 每个单元写一句话剧情 summary，并列出本单元涉及的 roles / scenes / items（必须用资产表里的 name）。
+- 单元首尾相接、覆盖全片，不留空档；边界落在场景切换、对话停顿或情绪转折处。
 
-三、声音用颜色单独标记（写在 sound 字段里）
-🔵【人物口播／对白｜人物名】画面中谁开口，就写谁。写清是对镜、对台下，还是对另一位人物说。
-🟠【画外旁白｜声线归属】有人声但画面切到产品、生活素材或动画时，标明旁白覆盖哪些镜头。
-- 同一句话跨多个镜头时，完整台词只在第一个镜头写一次，后续镜头写「承接上一镜，切在第 X 个词」。
-- 台词从人物开口转为画外音时，写清转为画外音的具体词或切点。
-- 优先核对原声音轨；只能从字幕读取时，标明「据画面字幕整理」。
-- 说话人无法确认时，标注「说话人待确认」；听不清的词写「待核对」，不要补写。
+三、全片设定
+- style：一句话写全片画风、影调、光线、质感、剪辑节奏（例如「冷调写实，低照度侧光，浅景深，手持轻晃，剪辑偏快」）。
+- title：一句话概括片子内容；ratio：画面比例，如 9:16。
 
-四、原片文字单独标注（写在 onScreenText 字段）
-区分口播字幕、活动价签、人物身份条、背景招牌和产品包装，记录它们的出现位置和时间。
-只有画面出现的数字留在画面栏（description / onScreenText），只有实际说出的内容才放进口播或旁白，两者不要混。
+${transcript ? `【音轨转写台词（带时间戳）】\n${transcript}\n核对台词与画面对应关系；同音字按上下文校正，但不得改写内容。` : "【本片没有可用的音轨转写】按画面唇形和字幕判断台词，看不清写「台词待核对」。"}
 
-五、风格与图片描述词
-- style：用一句话概括全片统一的画风、影调、光线和质感（例如「电影感写实，暖调侧光，浅景深，画面偏胶片颗粒」）。这条风格会拼进每张参考图和每个分镜提示词，必须写具体，不要写「很好看」这类空话。
-- 每镜的 imagePrompt：写给生图模型用的该镜首帧提示词，按「画面主体与动作 → 人物位置与朝向 → 场景与道具 → 景别机位光线 → 风格」的顺序写成一段，150 字以内；直接引用角色/场景/物品的名字，不要写「分镜 N」「如上」这类引用。
-
-六、输出前自检
-- 时间轴是否覆盖全片：首镜从 0.0 秒开始，末镜到视频结束，镜头之间不留空档。
-- 宫格里每个场景切换至少对应一个分镜，不要好几个场景合并成一镜。
-- 台词有无漏写或重复；跨镜头的同一句是否只写了一次。
-- 每镜的 roles / scenes / items 名称，必须与 roles / scenes / items 数组里的 name 完全一致；
-  同一对象只出现一次，名称简短，不要出现「红衣女子」和「女主角」两个名字指同一个人。
-- 看不清的细节写「画面不清晰」或「待核对」，禁止凭常识补出品牌名、价格、字幕内容。
-- 时间码以宫格上标注的时间戳为准，不要按帧率推算。
-- 品牌、包装、价格、数量和原话先按原片记录，不要改写或替换。
-
-严格返回 JSON（不要 markdown 代码块）：
+只输出 JSON（不要 markdown 代码块）：
 {
-  "title": "一句话概括视频主题",
-  "ratio": "画面比例，如 9:16",
-  "style": "全片统一的画风/影调/光线/质感，一句话",
-  "roles": [{ "name": "角色名", "description": "外观、服装、发型、气质等可复用于生图的描述" }],
-  "scenes": [{ "name": "场景名", "description": "地点、光线、环境布置等可复用于生图的描述" }],
-  "items": [{ "name": "物品名", "description": "外观、材质、颜色等可复用于生图的描述" }],
-  "shots": [{
-    "group": 1,
-    "start": "0.0秒",
-    "end": "2.3秒",
-    "duration": "2.3秒",
-    "shotSize": "特写/近景/中景/全景/远景",
-    "cameraAngle": "平视/俯拍/仰拍/正面/侧面/过肩等，含机位高低",
-    "cameraMove": "固定/推/拉/摇/移/跟/手持",
-    "description": "画面：第一帧是什么，人物在画面左/中/右哪个位置、身体朝哪、谁拿着什么、前景和背景有哪些物件，镜头结束时动作停在哪里",
-    "performance": "表演：具体动作及发生顺序，视线落点、手势、呼吸停顿、表情变化，哪个动作落在哪个词上",
-    "sound": "声音：🔵【人物口播／对白｜人物名】或 🟠【画外旁白｜声线归属】，以及环境声、操作音效，含说话人与起止位置",
-    "dialogue": "该镜头对应的台词/口播原文（没有则为空字符串）",
-    "onScreenText": "画面文字：口播字幕/活动价签/人物身份条/背景招牌/产品包装，记录内容、位置与出现时间（没有则为空字符串）",
-    "imagePrompt": "该镜首帧的图片描述词，150 字以内",
-    "roles": ["该镜头出现的角色名"],
-    "scenes": ["该镜头所在场景名"],
-    "items": ["该镜头出现的关键物品名"]
-  }]
+  "title": "一句话概括",
+  "ratio": "9:16",
+  "style": "全片风格一句话",
+  "roles": [{ "name": "角色名", "description": "外观/服装/发型等", "voice": "性别、声音年龄、音色、音高、共鸣、语言/方言、基础语速" }],
+  "scenes": [{ "name": "场景名", "description": "地点/时间/光线/陈设" }],
+  "items": [{ "name": "物品名", "description": "外观/材质/颜色/状态" }],
+  "outline": [{ "start": "0.0秒", "end": "10.0秒", "summary": "一句话剧情", "roles": ["角色名"], "scenes": ["场景名"], "items": ["物品名"] }]
 }
 
 只输出 JSON。`;
 }
 
-export function aiTextUrl(config: AiConfig, path: string) {
-    return buildApiUrl(config.baseUrl, path);
+/** 第二步：逐时间窗细化，产出可直接出片的分镜单元。 */
+function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
+    const lines = [
+        `你是一名电影导演、摄影指导、表演指导和声音导演。这是分镜分析的第二步：把所有已锁定的资产交给模型，细化第 ${ctx.index}/${ctx.total} 个时间窗内的分镜单元。`,
+        "",
+        "视频元数据：",
+        `- 时长：${meta.duration.toFixed(1)} 秒；分辨率：${meta.width}x${meta.height}`,
+        `- 本窗范围：${ctx.startTime.toFixed(1)}~${ctx.endTime.toFixed(1)} 秒，宫格里的每一格都落在这个范围内，格子按时间顺序排列并标了时间点。`,
+        ctx.cuts && ctx.cuts.length ? `- 本窗检测到 ${ctx.cuts.length} 处切点：${formatCuts(ctx.cuts)}（只作为节拍时间的参考，不要一个切点一个单元）。` : "",
+        "",
+        "【已锁定资产】以下名称必须原样沿用，不得重新设计，也不得给同一对象另起名字：",
+        ctx.casting.roles.length ? `角色：${castingLine(ctx.casting.roles)}` : "角色：无",
+        ctx.casting.scenes.length ? `场景：${castingLine(ctx.casting.scenes)}` : "场景：无",
+        ctx.casting.items.length ? `物品：${castingLine(ctx.casting.items)}` : "物品：无",
+        "本窗新出现、资产表里没有的对象可以补进输出数组，name 同样要简短唯一。",
+        "",
+        ctx.previousEndState ? `【上一单元结束状态】${ctx.previousEndState}\n本窗第一个节拍必须自然承接它（站位、姿态、道具、声音都不许无原因重置）。` : "",
+        ctx.transcript ? `【本窗台词（带时间戳，必须逐字使用）】\n${ctx.transcript}\n台词按时间对齐到节拍；不得改写、增删、重复。时间戳与画面对不上时以画面为准并微调节拍，但台词文字保持原样。` : "【本窗没有可靠台词】按画面唇形/字幕判断，拿不准写「台词待核对」。",
+        "",
+        directingRules,
+        "",
+        "【输出要求】",
+        "- shots 里只写完全落在本窗范围内的单元，按时间排序；单元 5~15 秒，不少于 1 个、不要超出本窗范围太多。",
+        "- 每个单元的 videoPrompt 第一行是【起-止秒】，之后每行一个节拍：「起-止秒：在 @场景 中，<景别><机位><角度><运动>拍摄。@角色 <位置朝向、动作、眼神、表情>，说道：\"台词\"。」",
+        "- 没有台词的节拍写环境声、动作音效或画外音，并标注声音类型。",
+        "- 最后一个节拍写清收尾状态（可用「容错时间内保持…」），方便下一单元衔接。",
+        "- 结构化字段：shotSize / cameraAngle / cameraMove 写单元主镜头语言；description 写画面从第一帧到最后一帧的变化；performance 写表演要点；sound 写声音事件（带类型）；dialogue 写本单元台词合并文本；onScreenText 写画面文字；roles / scenes / items 写本单元用到的资产名；imagePrompt 写该单元首帧的生图提示词（150 字内，直接引用资产名）。",
+        "- title / ratio / style 不用重复输出，可以省略。",
+        "",
+        "只输出 JSON（不要 markdown 代码块）：",
+        `{
+  "shots": [{
+    "start": "${ctx.startTime.toFixed(1)}秒",
+    "end": "10.0秒",
+    "duration": "10.0秒",
+    "videoPrompt": "【0秒-10秒】\\n0-4秒：在 @场景名 中，…\\n5-7秒：…\\n8-10秒：…",
+    "shotSize": "特写/近景/中景/全景/远景",
+    "cameraAngle": "平视/俯拍/仰拍/正面/侧面/过肩等，含机位高低",
+    "cameraMove": "固定/推/拉/摇/移/跟/手持，含起止位置",
+    "description": "画面：第一帧到最后一帧的变化",
+    "performance": "表演：动机、眼神落点、微表情、呼吸、肢体、情绪落点",
+    "sound": "声音：DIALOGUE/NARRATION/ENVIRONMENT/SFX 等，含发声者与起止",
+    "dialogue": "本单元台词合并文本（没有则为空字符串）",
+    "onScreenText": "画面文字（没有则为空字符串）",
+    "imagePrompt": "该单元首帧的图片描述词，150 字以内",
+    "roles": ["角色名"],
+    "scenes": ["场景名"],
+    "items": ["物品名"]
+  }],
+  "roles": [{ "name": "本窗新角色", "description": "…", "voice": "…" }],
+  "scenes": [], "items": []
 }
 
-export function aiTextHeaders(config: AiConfig) {
-    return { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" };
+只输出 JSON。`,
+    ];
+    return lines.filter(Boolean).join("\n");
 }
 
 /**
@@ -274,7 +295,7 @@ export function aiTextHeaders(config: AiConfig) {
  * 差异超过阈值就判定为「镜头切换」，保留该时刻的高清帧；再均匀补齐到 maxFrames。
  * 相比固定间隔抽帧，关键镜头不容易漏，重复帧也不会占满额度。
  */
-export async function extractSceneFrames(file: File, maxFrames = 32, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
+export async function extractSceneFrames(file: File, maxFrames = 60, signal?: AbortSignal): Promise<{ frames: CopyFrame[]; meta: CopyVideoMeta }> {
     const src = URL.createObjectURL(file);
     const video = document.createElement("video");
     video.src = src;
@@ -478,18 +499,8 @@ export async function buildFrameGrid(frames: CopyFrame[], aspect = 16 / 9): Prom
 }
 
 /** 调用多模态模型分析宫格图。sessionToken 必须是后台登录态 token（不是中转 key）。 */
-export async function analyzeVideoGrid(
-    config: AiConfig,
-    gridDataUrl: string,
-    meta: CopyVideoMeta,
-    model: string,
-    sessionToken: string,
-    transcript = "",
-    signal?: AbortSignal,
-    batch?: CopyAnalyzeBatch,
-): Promise<CopyAnalysis> {
-    const basePrompt = analysisPrompt(meta, batch);
-    const promptText = transcript ? `${basePrompt}\n\n附：视频音轨自动转写的台词（带时间戳，可直接用于分镜的口播/台词字段，注意校正同音字）\n${transcript}` : basePrompt;
+/** 提交一次分析任务并轮询到完成，返回模型输出原文（提交/查询都走登录态）。 */
+async function runAnalyzeJob(sessionToken: string, model: string, prompt: string, image: string, signal?: AbortSignal): Promise<string> {
     if (!sessionToken.trim()) throw new Error("请先登录后再分析");
     // 走异步任务：长请求会被链路中间代理 120s 掐断，改成「提交 + 轮询」。
     // 用同源相对路径：`/api/user/**` 挂的是 UserAuth，只认后台登录态 token；
@@ -499,7 +510,7 @@ export async function analyzeVideoGrid(
     const endpoint = "/api/user/copy/analyze";
     const headers = { Authorization: `Bearer ${sessionToken.trim()}` };
     // 把后端的中文 message（如「access token 无效」）透出来，别只显示 HTTP 401。
-    const submit = await axios.post(endpoint, { model, prompt: promptText, image: gridDataUrl }, { headers, signal, timeout: 30000 }).catch((error: unknown) => {
+    const submit = await axios.post(endpoint, { model, prompt, image }, { headers, signal, timeout: 30000 }).catch((error: unknown) => {
         throw new Error(readAxiosError(error, "提交分析任务失败"));
     });
     const jobId = String((submit.data as { jobId?: string })?.jobId || "");
@@ -511,11 +522,35 @@ export async function analyzeVideoGrid(
             throw new Error(readAxiosError(error, "查询分析进度失败"));
         });
         const data = poll.data as { status?: string; content?: string; error?: string };
-        if (data.status === "done") {
-            return normalizeAnalysis(extractJson(String(data.content || "")));
-        }
+        if (data.status === "done") return String(data.content || "");
         if (data.status === "failed") throw new Error(data.error || "分析失败");
     }
+}
+
+/** 第一步：全片资产表 + 分镜大纲。 */
+export async function analyzeOverview(
+    gridDataUrl: string,
+    meta: CopyVideoMeta,
+    model: string,
+    sessionToken: string,
+    transcript = "",
+    signal?: AbortSignal,
+): Promise<CopyOverview> {
+    const content = await runAnalyzeJob(sessionToken, model, overviewPrompt(meta, transcript), gridDataUrl, signal);
+    return normalizeOverview(extractJson(content));
+}
+
+/** 第二步：按时间窗逐个细化分镜单元。 */
+export async function analyzeShotsWindow(
+    gridDataUrl: string,
+    meta: CopyVideoMeta,
+    model: string,
+    sessionToken: string,
+    ctx: CopyWindowContext,
+    signal?: AbortSignal,
+): Promise<CopyAnalysis> {
+    const content = await runAnalyzeJob(sessionToken, model, windowPrompt(meta, ctx), gridDataUrl, signal);
+    return normalizeAnalysis(extractJson(content));
 }
 
 
@@ -596,6 +631,52 @@ export async function transcribeAudio(baseUrl: string, sessionToken: string, wav
     const data = response.data as { success?: boolean; text?: string; message?: string };
     if (!data?.success) return "";
     return String(data.text || "").trim();
+}
+
+export type TranscriptSegment = { start: number; end: number; text: string };
+
+/** "1:02:03,400" / "02:03.4" / "12.5" → 秒。 */
+function timecodeToSeconds(value: string) {
+    const text = String(value || "").trim().replace(",", ".");
+    const parts = text.split(":").map((part) => Number(part));
+    if (parts.some((part) => !Number.isFinite(part))) return NaN;
+    return parts.reduce((acc, part) => acc * 60 + part, 0);
+}
+
+/**
+ * 解析带时间戳的转写：支持
+ *   [00:00:01,240 --> 00:00:03,500] 台词
+ *   [00:01 - 00:03] 台词
+ *   [00:01,240 - 00:03,500] 台词
+ * 没有时间戳的整段文本返回空数组（调用方降级为「不带时间轴的台词」）。
+ */
+export function parseTranscript(raw: string): TranscriptSegment[] {
+    const text = String(raw || "");
+    if (!text.trim()) return [];
+    const segments: TranscriptSegment[] = [];
+    const pattern = /\[\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*(?:-->|->|~|-|,)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*\]\s*([^\[\n]+)/g;
+    for (const match of text.matchAll(pattern)) {
+        const start = timecodeToSeconds(match[1]);
+        const end = timecodeToSeconds(match[2]);
+        const line = match[3].trim();
+        if (!line || !Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+        segments.push({ start, end, text: line });
+    }
+    return segments.sort((a, b) => a.start - b.start);
+}
+
+/** 整片台词（给第一步做全局理解用）。没有时间戳时原样返回。 */
+export function formatTranscript(raw: string, segments: TranscriptSegment[]) {
+    if (!segments.length) return String(raw || "").trim();
+    return segments.map((segment) => `${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`).join("\n");
+}
+
+/** 只取落在时间窗内的台词，前后各放 1 秒容差，避免跨边界的半句被切掉。 */
+export function transcriptForWindow(segments: TranscriptSegment[], start: number, end: number) {
+    return segments
+        .filter((segment) => segment.end >= start - 1 && segment.start <= end + 1)
+        .map((segment) => `${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`)
+        .join("\n");
 }
 
 /** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。提示词由调用方按素材类型拼好。 */
@@ -693,16 +774,10 @@ export async function generateShotVideo(
  * 景别/机位/运动单独成句，避免和画面描述混在一起被模型忽略。
  */
 export function shotPrompt(shot: CopyShot, style = ""): string {
+    // 分析阶段已经写好「整段范围 + 逐节拍时间线」，直接用它出片；老数据没有时才按字段拼。
     const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
-    const lines = [
-        style ? `风格：${style}` : "",
-        camera ? `镜头：${camera}` : "",
-        shot.description ? `画面：${shot.description}` : "",
-        shot.performance ? `表演：${shot.performance}` : "",
-        shot.dialogue ? `台词：${shot.dialogue}` : "",
-        shot.onScreenText ? `画面文字：${shot.onScreenText}` : "",
-    ];
-    const prompt = lines.filter(Boolean).join("\n");
+    const body = String(shot.videoPrompt || "").trim() || [camera, shot.description, shot.performance, shot.dialogue ? `台词：${shot.dialogue}` : "", shot.onScreenText ? `画面文字：${shot.onScreenText}` : ""].filter(Boolean).join("\n");
+    const prompt = [style ? `风格：${style}` : "", body].filter(Boolean).join("\n");
     return prompt || shot.description || "复刻原片镜头的画面与运镜";
 }
 
@@ -794,20 +869,68 @@ function closeUnclosedJson(value: string): string {
     return "";
 }
 
+function normalizeItems(value: unknown, section: "roles" | "scenes" | "items", stamp: number): CopyItem[] {
+    return (Array.isArray(value) ? value : [])
+        .map((item, index) => {
+            const record = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+            const name = String(record.name ?? "").trim();
+            if (!name) return null;
+            return {
+                id: `${section}-${stamp}-${index}`,
+                name,
+                description: String(record.description ?? "").trim(),
+                ...(section === "roles" ? { voice: String(record.voice ?? "").trim() } : {}),
+            };
+        })
+        .filter((item): item is CopyItem => Boolean(item));
+}
+
+export function normalizeOverview(raw: Record<string, unknown>): CopyOverview {
+    const stamp = Date.now();
+    const outline: CopyOutlineUnit[] = (Array.isArray(raw.outline) ? raw.outline : [])
+        .map((unit) => {
+            const record = (unit && typeof unit === "object" ? unit : {}) as Record<string, unknown>;
+            const asList = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+            return {
+                start: String(record.start ?? "").trim(),
+                end: String(record.end ?? "").trim(),
+                summary: String(record.summary ?? "").trim(),
+                roles: asList(record.roles),
+                scenes: asList(record.scenes),
+                items: asList(record.items),
+            };
+        })
+        .filter((unit) => unit.start && unit.end);
+    return {
+        title: String(raw.title ?? "").trim() || "爆款转绘",
+        ratio: String(raw.ratio ?? "").trim(),
+        style: String(raw.style ?? "").trim(),
+        roles: normalizeItems(raw.roles, "roles", stamp),
+        scenes: normalizeItems(raw.scenes, "scenes", stamp),
+        items: normalizeItems(raw.items, "items", stamp),
+        outline,
+    };
+}
+
+/** 把第二步产出的实体并回第一步的资产表：同名的以资产表为准，新出现的追加。 */
+export function mergeCasting(overview: CopyOverview, extra: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] }) {
+    const merge = (base: CopyItem[], add: CopyItem[]) => {
+        const names = new Set(base.map((item) => item.name));
+        return [...base, ...add.filter((item) => !names.has(item.name))];
+    };
+    return {
+        roles: merge(overview.roles, extra.roles),
+        scenes: merge(overview.scenes, extra.scenes),
+        items: merge(overview.items, extra.items),
+    };
+}
+
 function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     const stamp = Date.now();
     // id 必须按分区加前缀：roles/scenes/items 各自从 0 开始编号，
     // 之前三个分区都用 `item-<stamp>-<index>`，导致角色 0 / 场景 0 / 物品 0 是同一个 id，
     // 生成一张图会同时显示在三个分区里（itemImages 是按 id 存的），后续生成还会互相覆盖。
-    const toItems = (value: unknown, section: "roles" | "scenes" | "items"): CopyItem[] =>
-        (Array.isArray(value) ? value : [])
-            .map((item, index) => {
-                const record = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
-                const name = String(record.name ?? "").trim();
-                if (!name) return null;
-                return { id: `${section}-${stamp}-${index}`, name, description: String(record.description ?? "").trim() };
-            })
-            .filter((item): item is CopyItem => Boolean(item));
+    const toItems = (value: unknown, section: "roles" | "scenes" | "items"): CopyItem[] => normalizeItems(value, section, stamp);
     const toShots = (value: unknown): CopyShot[] =>
         (Array.isArray(value) ? value : [])
             .map((item, index) => {
@@ -819,6 +942,7 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
                     start: text("start"),
                     end: text("end"),
                     duration: text("duration"),
+                    videoPrompt: text("videoPrompt"),
                     shotSize: text("shotSize"),
                     cameraAngle: text("cameraAngle"),
                     cameraMove: text("cameraMove"),
@@ -846,33 +970,23 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
 }
 
 /**
- * 把关键帧按场景切成若干批：每批最多 maxScenes 个场景、maxFrames 帧。
- * 一批只覆盖一段连续时间，模型不用在一张图上同时盯十几个镜头，画面也能给得更大。
+ * 按时间窗切帧：从第一步的单元大纲出发，每窗 frames 帧连续覆盖一段时间。
+ * 和按场景切不同，这里保证一窗只覆盖一段连续时间，分镜单元不会跨窗。
  */
-export function groupFramesIntoBatches(frames: CopyFrame[], maxScenes = 10, maxFrames = 16): CopyFrame[][] {
-    const byScene = new Map<number, CopyFrame[]>();
-    for (const frame of frames) {
-        const list = byScene.get(frame.scene) ?? [];
-        list.push(frame);
-        byScene.set(frame.scene, list);
-    }
-    const sceneIds = [...byScene.keys()].sort((a, b) => a - b);
-    const batches: CopyFrame[][] = [];
-    let current: CopyFrame[] = [];
-    let scenesInCurrent = 0;
-    for (const id of sceneIds) {
-        const list = byScene.get(id) ?? [];
-        // 满一批就切：宁可多几批，也不要让单张宫格塞到看不清
-        if (current.length && (current.length + list.length > maxFrames || scenesInCurrent >= maxScenes)) {
-            batches.push(current);
-            current = [];
-            scenesInCurrent = 0;
-        }
-        current.push(...list);
-        scenesInCurrent += 1;
-    }
-    if (current.length) batches.push(current);
-    return batches;
+export function groupFramesIntoWindows(frames: CopyFrame[], perWindow = 16): CopyFrame[][] {
+    const sorted = [...frames].sort((a, b) => a.time - b.time);
+    const windows: CopyFrame[][] = [];
+    for (let index = 0; index < sorted.length; index += perWindow) windows.push(sorted.slice(index, index + perWindow));
+    return windows;
+}
+
+/** 均匀抽稀到 max 帧（保留首尾），给第一步的「全局视图」用。 */
+export function sampleFrames(frames: CopyFrame[], max = 24): CopyFrame[] {
+    const sorted = [...frames].sort((a, b) => a.time - b.time);
+    if (sorted.length <= max) return sorted;
+    const picked: CopyFrame[] = [];
+    for (let index = 0; index < max; index += 1) picked.push(sorted[Math.round((index * (sorted.length - 1)) / (max - 1))]);
+    return picked.filter((frame, index, list) => list.findIndex((other) => other.time === frame.time) === index);
 }
 
 /** 合并多批分析结果：同名的角色/场景/物品只留一条（描述取更完整的），分镜按时间排序去重。 */

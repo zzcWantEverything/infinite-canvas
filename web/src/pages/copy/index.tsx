@@ -31,19 +31,25 @@ import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import {
-    analyzeVideoGrid,
+    analyzeOverview,
+    analyzeShotsWindow,
     buildFrameGrid,
     composeShotImagePrompt,
     extractAudioWav,
     extractSceneFrames,
+    formatTranscript,
     generateItemImage,
     generateShotImage,
     generateShotVideo,
-    groupFramesIntoBatches,
+    groupFramesIntoWindows,
     matchFramesToShots,
     mergeBatchAnalyses,
+    mergeCasting,
+    parseTranscript,
+    sampleFrames,
     sanitizeItemIds,
     transcribeAudio,
+    transcriptForWindow,
     type CopyAnalysis,
     type CopyFrame,
     type CopyItem,
@@ -92,6 +98,9 @@ export default function CopyVideoPage() {
     const [analyzing, setAnalyzing] = useState(false);
     // 只暴露一个百分比进度条：分批/抽帧/转写这些过程对用户没意义。
     const [analysisPercent, setAnalysisPercent] = useState(0);
+    // 分析阶段文案：抽帧 / 转写 / 资产表 / 第几窗细化
+    const [analysisStage, setAnalysisStage] = useState<"" | "frames" | "transcribe" | "overview" | "window">("");
+    const [windowProgress, setWindowProgress] = useState<{ current: number; total: number } | null>(null);
     const [error, setError] = useState("");
     // 角色/场景/物品 → 生成图；分镜 → 原视频分镜图 / 图片预览 / 视频预览
     const [itemImages, setItemImages] = useState<Record<string, CopyMedia>>({});
@@ -116,7 +125,7 @@ export default function CopyVideoPage() {
     const sessionToken = useUserStore((state) => state.session?.token || "");
 
     // 弹窗：角色/场景/物品编辑、分镜详情、风格内联编辑
-    const [assetDraft, setAssetDraft] = useState<{ section: Section; id: string | null; name: string; description: string } | null>(null);
+    const [assetDraft, setAssetDraft] = useState<{ section: Section; id: string | null; name: string; description: string; voice: string } | null>(null);
     const [shotDraft, setShotDraft] = useState<CopyShot | null>(null);
     const [styleEditing, setStyleEditing] = useState(false);
     const [styleDraft, setStyleDraft] = useState("");
@@ -283,48 +292,76 @@ export default function CopyVideoPage() {
         setError("");
         setAnalysis(null);
         try {
-            setAnalysisPercent(5);
-            const { frames, meta } = await extractSceneFrames(file, 32);
-            setAnalysisPercent(12);
-            // 音轨转写（失败降级为无台词，不阻塞分析）
-            setAnalysisPercent(20);
-            let transcript = "";
+            // 1) 抽帧：上限 60 帧（1 秒 1 帧打底 + 切点首帧），长片按比例抽稀，但比原来的 32 帧密一倍。
+            setAnalysisStage("frames");
+            setAnalysisPercent(4);
+            const { frames, meta } = await extractSceneFrames(file, 60);
+            setAnalysisPercent(10);
+            // 2) 音轨转写：失败降级为无台词，不阻塞分析。带时间戳的转写会按时间窗对齐到节拍。
+            setAnalysisStage("transcribe");
+            let rawTranscript = "";
             try {
                 const audio = await extractAudioWav(file);
-                if (audio) transcript = await transcribeAudio(config.baseUrl, sessionToken, audio.blob);
+                if (audio) rawTranscript = await transcribeAudio(config.baseUrl, sessionToken, audio.blob);
             } catch {
-                transcript = "";
+                rawTranscript = "";
             }
-            // 按场景分批：每批 6 个镜头 / 9 帧，宫格能画得更大，模型也不用同时盯整条时间线。
-            // 串行是有意的——后一批要吃前一批定下的角色/场景名字，并行就会各叫各的。
-            const batches = groupFramesIntoBatches(frames);
+            const segments = parseTranscript(rawTranscript);
+            setAnalysisPercent(15);
+            // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格。
+            setAnalysisStage("overview");
+            const overviewFrames = sampleFrames(frames, 24);
+            const overviewGrid = await buildFrameGrid(overviewFrames, meta.width / meta.height);
+            const overview = await analyzeOverview(overviewGrid, meta, ANALYSIS_MODEL, sessionToken, formatTranscript(rawTranscript, segments));
+            setAnalysisPercent(25);
+            // 4) 第二步：按时间窗逐段细化，串行——后面的窗要吃前面窗定下的资产和收尾状态。
+            const windows = groupFramesIntoWindows(frames, 16);
             let result: CopyAnalysis | null = null;
-            for (let index = 0; index < batches.length; index += 1) {
-                setAnalysisPercent(20 + Math.round((index / batches.length) * 72));
-                const batchFrames = batches[index];
-                const grid = await buildFrameGrid(batchFrames, meta.width / meta.height);
+            let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
+            let previousEndState = "";
+            for (let index = 0; index < windows.length; index += 1) {
+                setAnalysisStage("window");
+                setWindowProgress({ current: index + 1, total: windows.length });
+                setAnalysisPercent(25 + Math.round((index / windows.length) * 68));
+                const windowFrames = windows[index];
+                const startTime = windowFrames[0].time;
+                const endTime = index + 1 < windows.length ? windows[index + 1][0].time : meta.duration;
+                const grid = await buildFrameGrid(windowFrames, meta.width / meta.height);
                 let partial: CopyAnalysis;
                 try {
-                    partial = await analyzeVideoGrid(config, grid, meta, ANALYSIS_MODEL, sessionToken, transcript, undefined, {
+                    partial = await analyzeShotsWindow(grid, meta, ANALYSIS_MODEL, sessionToken, {
                         index: index + 1,
-                        total: batches.length,
-                        startTime: batchFrames[0].time,
-                        endTime: batchFrames[batchFrames.length - 1].time,
-                        // 本批范围内的切点：让模型把分镜边界对齐到真实切换点
-                        cuts: (meta.cuts ?? []).filter((time) => time >= batchFrames[0].time - 0.01 && time <= batchFrames[batchFrames.length - 1].time + 0.01),
-                        known: result ? { roles: result.roles, scenes: result.scenes, items: result.items } : undefined,
+                        total: windows.length,
+                        startTime,
+                        endTime,
+                        cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
+                        casting,
+                        transcript: transcriptForWindow(segments, startTime, endTime),
+                        previousEndState,
                     });
-                } catch (batchError) {
-                    // 已经拿到部分结果就别整单作废：后面几批失败时提示一句，保住前面分析好的镜头。
-                    if (!result) throw batchError;
-                    message.warning(t("copyVideo.batchPartial", { current: index + 1, total: batches.length }));
+                } catch (windowError) {
+                    // 已经拿到部分结果就别整单作废：后面几窗失败时提示一句，保住前面分析好的单元。
+                    if (!result) throw windowError;
+                    message.warning(t("copyVideo.batchPartial", { current: index + 1, total: windows.length }));
                     break;
                 }
+                casting = mergeCasting(overview, partial);
                 result = result ? mergeBatchAnalyses([result, partial]) : partial;
-                setAnalysisPercent(20 + Math.round(((index + 1) / batches.length) * 72));
+                const last = partial.shots[partial.shots.length - 1];
+                if (last) previousEndState = last.videoPrompt.split("\n").slice(-1)[0] || last.description;
+                setAnalysisPercent(25 + Math.round(((index + 1) / windows.length) * 68));
             }
             if (!result) throw new Error(t("copyVideo.analyzeFailed"));
-            setAnalysis(result);
+            const finalResult: CopyAnalysis = {
+                ...result,
+                title: result.title && result.title !== "爆款转绘" ? result.title : overview.title,
+                ratio: result.ratio || overview.ratio,
+                style: result.style || overview.style,
+                roles: casting.roles,
+                scenes: casting.scenes,
+                items: casting.items,
+            };
+            setAnalysis(finalResult);
             setSourceMeta({ sceneCount: meta.sceneCount, frameCount: frames.length });
             // 新的一次分析 → 新的一条历史，之前的记录保持原样。
             syncHistoryId(null);
@@ -334,7 +371,7 @@ export default function CopyVideoPage() {
             setShotOverrides({});
             setItemImages({});
             // 原视频分镜图在后台补齐，先让用户看到分析结果。
-            void attachStoryboards(result, frames);
+            void attachStoryboards(finalResult, frames);
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
             if (e instanceof DOMException && e.name === "AbortError") return;
@@ -342,6 +379,8 @@ export default function CopyVideoPage() {
         } finally {
             setAnalyzing(false);
             setAnalysisPercent(0);
+            setAnalysisStage("");
+            setWindowProgress(null);
         }
     };
 
@@ -380,6 +419,7 @@ export default function CopyVideoPage() {
                               start: "",
                               end: "",
                               duration: "",
+                              videoPrompt: "",
                               shotSize: "",
                               cameraAngle: "",
                               cameraMove: "",
@@ -676,7 +716,7 @@ export default function CopyVideoPage() {
             const normalized: CopyAnalysis = {
                 ...sanitized.analysis,
                 style: sanitized.analysis.style || "",
-                shots: (sanitized.analysis.shots || []).map((shot) => ({ ...shot, imagePrompt: shot.imagePrompt || "" })),
+                shots: (sanitized.analysis.shots || []).map((shot) => ({ ...shot, imagePrompt: shot.imagePrompt || "", videoPrompt: shot.videoPrompt || "" })),
             };
             setAnalysis(normalized);
             setSourceMeta(doc.source ?? null);
@@ -716,8 +756,8 @@ export default function CopyVideoPage() {
         }
     };
 
-    const openAddAsset = (section: Section) => setAssetDraft({ section, id: null, name: "", description: "" });
-    const openEditAsset = (section: Section, item: CopyItem) => setAssetDraft({ section, id: item.id, name: item.name, description: item.description });
+    const openAddAsset = (section: Section) => setAssetDraft({ section, id: null, name: "", description: "", voice: "" });
+    const openEditAsset = (section: Section, item: CopyItem) => setAssetDraft({ section, id: item.id, name: item.name, description: item.description, voice: item.voice || "" });
     const commitAsset = () => {
         if (!assetDraft) return;
         const name = assetDraft.name.trim();
@@ -726,9 +766,10 @@ export default function CopyVideoPage() {
             message.warning(t("copyVideo.nameRequired"));
             return;
         }
-        if (assetDraft.id) updateItem(assetDraft.section, assetDraft.id, { name, description });
+        const voice = assetDraft.section === "roles" ? assetDraft.voice.trim() : "";
+        if (assetDraft.id) updateItem(assetDraft.section, assetDraft.id, { name, description, ...(assetDraft.section === "roles" ? { voice } : {}) });
         else {
-            const item: CopyItem = { id: `${assetDraft.section}-${Date.now()}`, name, description };
+            const item: CopyItem = { id: `${assetDraft.section}-${Date.now()}`, name, description, ...(assetDraft.section === "roles" ? { voice } : {}) };
             setAnalysis((prev) => (prev ? { ...prev, [assetDraft.section]: [...prev[assetDraft.section], item] } : prev));
         }
         setAssetDraft(null);
@@ -873,9 +914,19 @@ export default function CopyVideoPage() {
                             </Button>
                         </div>
                         {analyzing ? (
-                            <div className="flex items-center gap-3">
-                                <Progress percent={analysisPercent} showInfo={false} size="small" strokeColor="#78716c" className="!mb-0 flex-1" />
-                                <span className="w-9 shrink-0 text-right text-xs tabular-nums text-stone-500 dark:text-stone-400">{analysisPercent}%</span>
+                            <div className="flex flex-col gap-1.5">
+                                <div className="flex items-center gap-3">
+                                    <Progress percent={analysisPercent} showInfo={false} size="small" strokeColor="#78716c" className="!mb-0 flex-1" />
+                                    <span className="w-9 shrink-0 text-right text-xs tabular-nums text-stone-500 dark:text-stone-400">{analysisPercent}%</span>
+                                </div>
+                                <div className="text-xs text-stone-500 dark:text-stone-400">
+                                    {analysisStage === "frames" ? t("copyVideo.stageFrames") : null}
+                                    {analysisStage === "transcribe" ? t("copyVideo.stageTranscribe") : null}
+                                    {analysisStage === "overview" ? t("copyVideo.stageOverview") : null}
+                                    {analysisStage === "window"
+                                        ? t("copyVideo.stageWindow", { current: windowProgress?.current ?? 1, total: windowProgress?.total ?? 1 })
+                                        : null}
+                                </div>
                             </div>
                         ) : null}
                         {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">{error}</div> : null}
@@ -1179,6 +1230,14 @@ export default function CopyVideoPage() {
                             rows={4}
                             placeholder={t("copyVideo.descPlaceholder")}
                         />
+                        {assetDraft.section === "roles" ? (
+                            <Input.TextArea
+                                value={assetDraft.voice}
+                                onChange={(event) => setAssetDraft({ ...assetDraft, voice: event.target.value })}
+                                rows={2}
+                                placeholder={t("copyVideo.voicePlaceholder")}
+                            />
+                        ) : null}
                     </div>
                 ) : null}
             </Modal>
@@ -1199,6 +1258,15 @@ export default function CopyVideoPage() {
             >
                 {shotDraft ? (
                     <div className="grid gap-3 pt-2 sm:grid-cols-2">
+                        <label className="flex flex-col gap-1 text-xs text-stone-500 sm:col-span-2 dark:text-stone-400">
+                            {t("copyVideo.videoPrompt")}
+                            <Input.TextArea
+                                rows={7}
+                                value={shotDraft.videoPrompt || ""}
+                                onChange={(event) => setShotDraft({ ...shotDraft, videoPrompt: event.target.value })}
+                                placeholder={t("copyVideo.videoPromptPlaceholder")}
+                            />
+                        </label>
                         {(
                             [
                                 ["start", t("copyVideo.fieldStart")],

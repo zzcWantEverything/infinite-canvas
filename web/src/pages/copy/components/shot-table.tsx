@@ -120,14 +120,14 @@ export function ShotTable(props: ShotTableProps) {
                                     <td className={cellClass}>
                                         <div className="relative">
                                             <Input.TextArea
-                                                value={shot.description}
-                                                onChange={(event) => props.onUpdate(shot.id, { description: event.target.value })}
+                                                value={shot.videoPrompt || ""}
+                                                onChange={(event) => props.onUpdate(shot.id, { videoPrompt: event.target.value })}
                                                 autoSize={{ minRows: 4, maxRows: 12 }}
                                                 placeholder={t("copyVideo.videoPromptPlaceholder")}
                                             />
                                             <button
                                                 type="button"
-                                                onClick={() => copyText(shot.description)}
+                                                onClick={() => copyText(shot.videoPrompt || "")}
                                                 className="absolute right-2 top-2 rounded bg-stone-100 p-1 text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-600 dark:bg-stone-800 dark:text-stone-500 dark:hover:bg-stone-700"
                                                 title={t("copyVideo.copyPrompt")}
                                             >
