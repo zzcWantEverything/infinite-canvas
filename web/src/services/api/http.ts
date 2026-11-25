@@ -83,6 +83,14 @@ export function readAxiosError(error: unknown, fallback: string) {
     return error instanceof Error ? humanizeUpstreamError(readApiErrorMessage(error.message) || error.message) : fallback;
 }
 
+/**
+ * 任务失败原因（200 响应里带的 error 文案）同样要脱敏：上游的报价、渠道号、
+ * 接口教程都藏在 fail_reason 里，不能原样显示在节点上。
+ */
+export function readFailureMessage(value: unknown, fallback: string) {
+    return humanizeUpstreamError(readApiErrorMessage(value)) || fallback;
+}
+
 let errorNotifier: ((text: string) => void) | null = null;
 let lastReport = { text: "", at: 0 };
 

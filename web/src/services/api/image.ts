@@ -1,3 +1,4 @@
+import { useUserStore } from "@/stores/use-user-store";
 import axios from "axios";
 
 import i18n from "@/i18n";
@@ -5,7 +6,8 @@ import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalPr
 import { readAxiosError, readStatusError } from "./http";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
+import { catalogVariant } from "./model-catalog";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl } from "@/services/image-storage";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
@@ -666,6 +668,9 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    // 任务模式下先走网关任务接口（有 task id 才能刷新续查）
+    const taskImages = await runImageTaskIfNeeded(requestConfig, prompt, [], options);
+    if (taskImages) return taskImages;
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
@@ -726,6 +731,9 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    // 任务模式下先走网关任务接口（参考图内联成 data URL）
+    const taskImages = await runImageTaskIfNeeded(requestConfig, prompt, references, options);
+    if (taskImages) return taskImages;
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -864,3 +872,106 @@ const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "
     model: "",
     systemPrompt: "",
 };
+
+/**
+ * 图片任务化（网关 /v1/tasks 通用任务接口）。
+ *
+ * 图片原来是同步请求：刷新/关页就断，任务 ID 也拿不到，节点只能显示「已中断」。
+ * 网关对 task 插件本来就会把图片请求落成持久任务（platform=minikey / action=text_to_image），
+ * 这里改成显式任务：提交拿 ID → 节点存 ID → 轮询 → 用 artifacts 取图。
+ */
+const IMAGE_TASK_PLUGIN = "minikey";
+
+/** 任务提交后的回调：画布用它把 task id 回写到节点，刷新后按它续查。 */
+let imageTaskObserver: ((taskId: string, model: string) => void) | null = null;
+
+export function setImageTaskObserver(observer: ((taskId: string, model: string) => void) | null) { imageTaskObserver = observer; }
+
+export type ImageTaskStatus = "pending" | "success" | "failed";
+
+export interface ImageTaskState {
+    status: ImageTaskStatus;
+    /** 上游失败原因，只有 failed 时有值 */
+    error?: string;
+}
+
+/** 提交一张图片任务，返回网关任务 ID。 */
+export async function createImageTask(config: AiConfig, body: Record<string, unknown>, options?: RequestOptions): Promise<string> {
+    try {
+        const response = await axios.post<{ task_id?: string; id?: string }>(aiApiUrl(config, `/tasks/${IMAGE_TASK_PLUGIN}`), body, {
+            headers: aiHeaders(config, "application/json"),
+            signal: options?.signal,
+        });
+        const taskId = String(response.data?.task_id || response.data?.id || "");
+        if (!taskId) throw new Error(apiText("requestFailed"));
+        return taskId;
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("requestFailed")));
+    }
+}
+
+/** 查一次任务状态。 */
+export async function pollImageTask(config: AiConfig, taskId: string, options?: RequestOptions): Promise<ImageTaskState> {
+    // 走会话认证的 /api 路由：/v1/tasks 要 sk- 令牌，页面里没有，会一直 401。
+    const body = await sessionApi<{ data?: { items?: { status?: string; fail_reason?: string }[] } }>(`/api/task/self?task_id=${encodeURIComponent(taskId)}`, options);
+    const item = body?.data?.items?.[0];
+    const status = String(item?.status || "").toUpperCase();
+    if (status === "SUCCESS") return { status: "success" };
+    if (status === "FAILURE") return { status: "failed", error: item?.fail_reason || "" };
+    return { status: "pending" };
+}
+
+/** 取任务产物地址（已把网关自报的主机改写成当前站点）。 */
+export async function fetchImageTaskUrls(config: AiConfig, taskId: string, options?: RequestOptions): Promise<string[]> {
+    const body = await sessionApi<{ data?: { artifacts?: { type?: string; content_url?: string }[] } }>(`/api/task/${encodeURIComponent(taskId)}/artifacts`, options);
+    const origin = new URL(config.baseUrl).origin;
+    return (body?.data?.artifacts || [])
+        .filter((item) => (item.type || "").toLowerCase() === "image" && item.content_url)
+        .map((item) => {
+            const url = new URL(String(item.content_url), origin);
+            return origin + url.pathname + url.search;
+        });
+}
+
+export async function waitForImageTask(config: AiConfig, taskId: string, options?: RequestOptions): Promise<string[]> {
+    for (;;) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const state = await pollImageTask(config, taskId, options);
+        if (state.status === "success") return fetchImageTaskUrls(config, taskId, options);
+        if (state.status === "failed") throw new Error(state.error || apiText("imageGenerationFailed"));
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+}
+
+/**
+ * 任务化出图：模型在目录里声明 invocation=task 时，走网关 /v1/tasks 任务接口。
+ * 这样刷新后能按 task id 续查；同步接口刷新即断、且参考图会被上游判为「没有可用参考图」。
+ */
+async function runImageTaskIfNeeded(requestConfig: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    if (catalogVariant(requestConfig.model)?.capabilities?.invocation !== "task") return null;
+    const images = (await Promise.all(references.map((item) => imageToDataUrl(item)))).filter(Boolean);
+    const body = {
+        model: requestConfig.model,
+        prompt: withSystemPrompt(requestConfig, prompt),
+        ...(requestConfig.size ? { size: requestConfig.size } : {}),
+        ...(images.length ? { images } : {}),
+    };
+    const taskId = await createImageTask(requestConfig, body, options);
+    imageTaskObserver?.(taskId, requestConfig.model);
+    const urls = await waitForImageTask(requestConfig, taskId, options);
+    const blob = await (await fetch(urls[0])).blob();
+    const dataUrl = await readFileAsDataUrl(new File([blob], "image.png", { type: blob.type || "image/png" }));
+    return [{ id: nanoid(), dataUrl }];
+}
+
+/** 用登录会话调 /api（和画柚其它管理接口同一套认证，避开 /v1/tasks 的令牌校验）。 */
+async function sessionApi<T>(path: string, options?: RequestOptions): Promise<T> {
+    const { session } = useUserStore.getState();
+    const base = (session?.baseUrl || "").replace(/\/$/, "");
+    const response = await fetch(`${base}${path}`, {
+        headers: { Authorization: `Bearer ${session?.token || ""}` },
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(apiText("requestFailed"));
+    return (await response.json()) as T;
+}

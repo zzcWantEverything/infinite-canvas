@@ -36,6 +36,8 @@ export type CanvasNodeImage = {
     naturalHeight: number;
     bytes: number;
     mimeType: string;
+    /** 任务化出图：网关任务 ID。有它就说明这张图还在生成，刷新后按它续查。 */
+    taskId?: string;
 };
 
 export type CanvasNodeText = {
@@ -83,6 +85,10 @@ export type CanvasNodeMetadata = {
     bytes?: number;
     durationMs?: number;
     videoTaskId?: string;
+    /** 图片任务化：网关任务 ID，和 videoTaskId 同等对待（写进文档随画布持久化）。 */
+    imageTaskId?: string;
+    /** 图片任务化：提交后先落在这里，刷新/切页后按它续查。 */
+    imagePendingTasks?: { taskId: string; model?: string }[];
     /**
      * 必须存真实 provider：断线重连后要按它选回对应的查询接口（ark/qora 与 openai 不同）。
      * "plugin" 表示由节点插件跑出来的任务——它的结果只在内存里，刷新后查不到，

@@ -1,35 +1,48 @@
 # 项目长期记忆 · 画柚 / infinite-canvas
 
 > 日常流水写 `YYYY-MM-DD.md`；这里只放跨会话仍然成立的结构、约定与坑。
-> 跨项目（两个前端别发串、服务器与部署入口）见 `E:\product\huayou\.workbuddy\memory\MEMORY.md`。
+> **路径约定**：项目内文件相对**本项目根目录**写；兄弟项目写 `../<项目名>`（两个项目在本地始终是同级目录，别管父目录叫什么）；服务器路径 `/home/ubuntu/...` 保持绝对（与本地机器无关）；本机环境（`~/.ssh`、Go 安装目录）标注「本机」。**不要写带盘符的绝对路径**——上级目录被挪过（`E:\product\huayou` → `E:\p` → `E:\huayou`），写死一次就前功尽弃。
+> 跨项目（两个前端别发串、服务器与部署入口）见 `../new-api/.workbuddy/memory/MEMORY.md`。
 
 ## 技术栈与结构
 
 - 前端 `web/`：Vite 7 + React 19 + React Router 7 + TypeScript + Ant Design 6 + Tailwind 4 + Zustand 5，包管理用 bun。
 - 不是全站 i18n：`i18n/locales/*` 只覆盖部分 UI，登录页等仍是硬编码中文；新增文案先查现有 key 再加。
 - 本地 Agent `canvas-agent/`（独立 npm 包，Node + express + zod，CLI 是 `@openai/codex`）；`canvas-proxy/` 是纯转发工具；`plugins/` 是节点插件与 Codex app 插件。
-- 无后端、无 BFF：API Key 与画布数据都在浏览器本地（localforage / IndexedDB），请求由前端直连 OpenAI 兼容接口。
-- 无 ESLint；测试只有 `canvas-agent` 的 8 个用例 + `web/tests/image-thumbnail.test.ts`；CI 只跑 `vite build`（不做类型检查）。
+- 主链路无 BFF，但**不是纯前端项目**：API Key 与画布/项目数据仍在浏览器本地（localforage / IndexedDB），图片视频生成由前端直连 OpenAI 兼容接口；而 /copy 的分析与转写、画布云存储（`/api/canvas/*`）、模型目录（`/api/user/models/catalog`）、钱包日志（`/api/log/self`）都走 new-api 服务端。
+- 无 ESLint；测试只有 `canvas-agent` 的 8 个用例 + `web/tests/image-thumbnail.test.ts`；CI 里 `github-pages.yml` 只在 `v*` tag 上跑 `bun install && bun run build`（不跑 tsc/test），另有插件发布与两个 docker 镜像 workflow。
 
 ## 请求层约定（2026-11 起）
 
 - 所有请求错误统一走 `web/src/services/api/http.ts`：`ApiError { kind, status }` + 全局 axios 拦截器。**不要再在业务模块里复制 `readApiErrorMessage` / `readAxiosError`**，直接 import。
 - 业务里需要给用户提示的失败用 `reportApiError`；同一文案 2 秒去重。生成类流程不要弹 toast（节点自身展示错误）。
 - 拦截器对取消请求**原样放行**（`axios.isCancel` 提前 return），否则会破坏画布 `AbortError` 的静默取消语义。改这段前先确认 `lib/canvas/canvas-generation-helpers.ts` 的取消判定。
-- 依赖登录态的接口必须加 `requiresAuth: true`（模块增强字段），否则 401 不会触发登出。目前只在 `auth.ts` 的 6 个用户态接口上标。
-- 登录态：后端无 refresh token（New API 风格），只做「启动校验 + 401/`success:false` 清会话重登录」。跳转由 `AuthGuard` 自动完成，**不要手写 navigate**。
-- **上游错误脱敏**：`lib/upstream-error.ts` 的 `humanizeUpstreamError()` 命中「渠道不可用 / 当前可用渠道 / channel 可传渠道 / not served by this plugin」就整段替换成「该模型当前线路不可用」，收敛在 `http.ts` 的 `toApiError` / `readAxiosError`（toast、节点、失败卡片全覆盖），画布老节点的 `errorDetails` 渲染时再兜一次。自家后端文案（余额不足等）不匹配这些词、原样透出。
+- 依赖登录态的接口必须加 `requiresAuth: true`（模块增强字段），否则 401 不会触发续期/登出。现已标在 `auth.ts`（7 处：登录、注册、改密、兑换码、邀请码等）、`logs.ts`、`model-catalog.ts`、`canvas-cloud.ts`（含媒体 presign）。
+- 登录态：access token 只有 15 分钟，new-api 用 HttpOnly cookie（`new_api_refresh`，`Path=/api/user/auth`）续期且 token 会轮转。`session.ts` 负责单飞续期（最小间隔 10s、429 退避 30s），`http.ts` 在 401 时续期并**重放一次**请求，续不上才清会话重登录；`success:false` 也要按同一套处理。跳转由 `AuthGuard` 自动完成，**不要手写 navigate**。
+- **上游错误脱敏（2026-11-24 改成白名单式）**：`lib/upstream-error.ts` 的 `humanizeUpstreamError()` 按顺序判：HTML 错误页 → 图片编号超界 → **价格**（货币符号+数字、`\d+ 元/积分`、倍率/单价/计费、price/billing/credit）→ 审核 → 超时 → 繁忙 → 参数不支持 → 上游内部标记（channel #、status_code、`"detail"`、curl、上游/渠道号）或超 160 字。命中就整段替换成固定说法，**价格绝不出现在前端**；只有我们自己后端的短文案（如「用户额度不足」）原样透出。
+  任务失败原因也走同一套：`http.ts` 的 `readFailureMessage(value, fallback)`，`video.ts` 里不要再直接用 `readApiErrorMessage(...) || 兜底`。节点 `errorDetails` 渲染时再兜一次。
 
 ## 模型目录与模型选择（2026-11 起）
 
 - 模型目录 `/api/user/models/catalog`（`services/api/model-catalog.ts`）：模块级缓存 + 5min TTL，登录后 `AuthGuard` 拉一次。
   读缓存用 `catalogVariant(name)` / `catalogGroupOf(name)`，版本通知用 `modelCatalogVersion()`（`useSyncExternalStore(subscribeModelCatalog, ...)`）。
   **能力 / 展示名 / billingUnit 的唯一来源是目录**，不要凭模型名猜。
-- 视频节点模型列表 = `/api/user/models`（`fetchUserVideoModels`）再用 `isVideoModel()` 过滤（`model-picker.tsx`）：
+- 视频节点模型列表 = `/api/user/models`（`fetchUserModels`，不是 `fetchUserVideoModels`）再用 `isVideoModel()` 过滤（`model-picker.tsx`）：
   目录 `capabilities.modality.output` 含 `video` 才是视频；目录没拉到先保留；目录有模型但没 output（手动加的 GPT 生图渠道）退回 `guessCapability` 关键词。
   图片节点走 `selectableModelsByCapability(config, "image")`（渠道 capability 标签过滤）。
 - 计价单位 = `catalogVariant(name).capabilities.billingUnit`（`second`/`request`）。不要用「1 秒和 2 秒是否同价」启发式——阶梯起步价（如 ≤5 秒一口价、之后按秒）会误判成按次。
 - 展示名格式「组名 · 型号 分辨率[ 按秒]」，`model-picker-groups.ts` 按 `" · "` 切成「组标题 + 线路名」，没 ` · ` 就整串当名字。
+- **模型下拉的分组覆盖**：`model-picker-groups.ts` 的 `MODEL_GROUP_OVERRIDES`（按模型 id 指定分组名），灵境那 8 个档位统一归到「特惠优选」。只影响展示，取值仍是 `渠道::模型名`。别改成按「特惠版」前缀匹配——老 miniKey 渠道也有同名模型，会被误吸进来。
+- **分档价差大的模型选中即落默认档**：`videoModelDefaultResolution(model)` 指定默认档（如特惠按秒款 480P），`applyNodeConfigPatch` / store 的 `updateConfig("videoModel")` 会把 `vquality` 与 `size` 一起落档；下拉报价也按这一档报。只在面板 effect 里落档不够——旧节点已有 `vquality` 时不会触发。
+
+## 图片生成（2026-11-24）
+
+- **参数按模型分流**：上游只有 `tt-image-2` 收 `size + quality`，`tt-image-2.5/2.6/banana` 系列只认 `aspectRatio + imageSize`。画柚走 OpenAI 图片协议只发 `size`，换算在网关插件里做（minikey 1.4.10）；**不要在前端按模型名拼 aspectRatio**。
+- **比例选项按能力渲染**：`image-settings-panel.tsx` 从 `catalogVariant(model).capabilities.fields.ratio.enum` 取可选比例，没声明才退回香蕉系写死列表。上游是**按线路**限制的（同一模型换条线路限制就不同），只能信目录，不能按模型名猜。
+- **清晰度只有 1K**：上游目前只开 1K 档，`AVAILABLE_IMAGE_SCALES = ["1k", "auto"]`；以后开放 2K/4K 把值加回数组即可。
+- **1k 预设要压在 150 万像素内**：`imageSizePresets["1k"]` 的 2:3 / 3:2 / 21:9 / 9:21 改成 `960x1440` / `1440x960` / `1680x720` / `720x1680`，否则上游按 2K 计费、界面却写 1k。
+- **默认比例 16:9**：`defaultConfig.size = "16:9"`；`persist` 的 `version: 1` + `migrate` 只把旧默认值 `1:1` 升上来，用户显式选过的不动。已有画布图片节点的比例存在节点元数据里，不会跟着变。
+- **提示词引用编号本地校验**：`lib/image-reference-prompt.ts` 的 `maxImageReferenceIndex()` 识别 `图片N` / `图N` / `Image N`（>100 当噪声），`createVideoGenerationTask` 派发前比对 `min(附件数, 模型 maxImages)`，超界直接报错——上游对越界请求回 502 并附一段 curl 教程。
 
 ## 画布交互（2026-11 中）
 
@@ -74,6 +87,7 @@ cd web && npx prettier --check <file>
   脚本切软链后自检首页，只保留最近 5 个版本。
 - 走 tgz 时包内可以裹一层目录，脚本会自己找 `index.html` 所在层提上来；找不到就中止且不动线上。
 - 校验线上 assets 必须带 `-A 'Mozilla/5.0'`：nginx 对空 UA 返 403，会误判成发布失败。
+- 2026-11-23 实测：`VERSION` 仍停在 `v0.20.1`（此后只切 `releases/web/<时间戳>`、没再升版本号），线上指向 `releases/web/20261121-131023`，首页 `<title>画柚</title>`、主包 `index-DnYTZ0o7.js`。
 
 ## 爆款转绘 /copy（2026-11-18）
 
@@ -90,7 +104,8 @@ cd web && npx prettier --check <file>
   4. `extractAudioWav`：`AudioContext.decodeAudioData` + `OfflineAudioContext` 重采样 16kHz 单声道、手写 WAV 编码
      （**不装 ffmpeg**；HEVC/AC3 等浏览器不认的编码返回 null 降级）
   5. `transcribeAudio`：调 new-api `POST /api/user/copy/transcribe`（腾讯云 ASR 代理，**用 session token 不是渠道 apiKey**），拿带时间戳台词
-  6. `analyzeVideoGrid`：宫格图 + 元数据 + 台词一起给 `gpt-6-sol`，输出角色/场景/物品 + 分镜（分镜含 `dialogue` 字段）
+  6. `analyzeVideoGrid`：宫格图 + 元数据 + 台词一起给 `gpt-6-sol`，输出角色/场景/物品 + 分镜（分镜含 `dialogue` 字段）。
+     **接口是异步的**：`POST /api/user/copy/analyze` 只收 `{model, prompt, image}`（**不收 apiKey / baseUrl**），返回 jobId 后按 `GET /api/user/copy/analyze/:id` 每 2s 轮询；令牌由服务端自己从 `tokens` 表取、地址固定 loopback，用来规避链路 120s 代理超时。
 - **模型调用必须走 `resolveModelRequestConfig`**：登录模式顶层 `config.apiKey` 是空的，真正可用的 relay key 在渠道上
   （启动时 `resolveRelayApiKey` 用 session token 换好）。直接读顶层 apiKey 会 401「无效的令牌」。
 - **图片节点的模型回显**（2026-11-18 修）：`resolveModelForCapability` 只在本地 `config.channels` 里匹配，服务器目录里的图片模型
@@ -115,3 +130,10 @@ cd web && npx prettier --check <file>
 - **mediaPending 文案曾撒谎**：`videoMediaPending` 写着「稍后自动重试」但没有重试代码，
   现在每 12 秒扫一次、指数退避最多 5 次，耗尽后改提示让用户手点「查询进度」。
 - 生成比例默认 **16:9**（图片/视频都是），分析完不再用原片比例覆盖。
+
+## 图片任务化（2026-11-25）
+
+- 图片生成已改成「网关任务」：`POST /v1/tasks/minikey` 提交拿 `task_id`，`GET /api/task/self?task_id=` 查状态，`GET /api/task/{id}/artifacts` 取图。**不要用 `/v1/tasks/{id}`**——它走 TokenAuth，页面里没有 sk- 令牌，会一直 401，表现为「上游成功但界面一直生成中」。
+- task id 的落法照抄视频：写进节点 `metadata.imageTaskId` + `forceCloudPushRef` 立刻落盘 + 骨架里 10 秒兜底扫描续查。**不要**再把 id 存在队列或观察者里（都试过，会因为找不到目标节点而失效）。
+- 参考图内联成 Base64 Data URL 传 `params.images`；上游 `banana` 分组临时下线时会 100% 失败，与代码无关。
+- 构建自检：改了源码后先在 `dist/assets/index-*.js` 里 grep 新增字符串；hash 不变 = 改动没编进去。

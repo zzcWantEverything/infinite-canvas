@@ -120,6 +120,22 @@ function builtinCapability(name: string) {
     return Object.prototype.hasOwnProperty.call(videoModelCapabilities, name) ? videoModelCapabilities[name] : null;
 }
 
+/**
+ * 进面板时默认落到哪一档分辨率。
+ *
+ * 按分辨率分档计价的模型，档差可能很大（特惠按秒款：480P 0.12 元/秒、720P 0.21 元/秒，
+ * 乘倍率后 0.18 与 0.315，30 秒差 4 元）。这类模型先落到它最低的一档，用户看到的下拉报价
+ * 和面板实价才是同一个数；想用高画质再自己点。
+ */
+const modelDefaultResolutions: Record<string, string> = {
+    "model-380066518676792496": "480",
+};
+
+/** 该模型指定的默认分辨率档；没有指定返回 undefined。 */
+export function videoModelDefaultResolution(model: string) {
+    return modelDefaultResolutions[model];
+}
+
 export function videoModelCapability(model: string): VideoModelCapability | null {
     // model 可能带渠道前缀 "channelId::modelName"，先剥掉前缀。
     const name = model.includes("::") ? model.slice(model.lastIndexOf("::") + 2) : model;

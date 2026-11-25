@@ -128,7 +128,9 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 }
 
 export function hasResumableVideoTask(node: CanvasNodeData) {
-    return node.type === CanvasNodeType.Video && Boolean(node.metadata?.videoTaskId) && !node.metadata?.content;
+    if (node.metadata?.content) return false;
+    if (node.type === CanvasNodeType.Video) return Boolean(node.metadata?.videoTaskId);
+    return node.type === CanvasNodeType.Image && Boolean(node.metadata?.imageTaskId);
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {

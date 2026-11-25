@@ -7,3 +7,4 @@ description: Planned follow-up work
 
 - Replace the Claude Code CLI adapter with a Claude Agent SDK adapter and improve the tool queue, following the [Local Agent Integration Plan](/docs/progress/local-agent-integration-plan).
 - Add Skill installation from web search, Skill resource-file management, and controlled local-memory persistence.
+- Cut COS egress cost on canvas media. Browsers fetch signed COS URLs directly, so every video preview or replay downloads the whole file: 2.98 GB of stored video already produced ~19.67 CNY of traffic in one billing period (the COS free tier only covers standard storage, not egress, and it expires 180 days after first activation). Proposed order: stop auto-loading the full file for video previews (poster frame, `preload="none"`, only fetch on play), then consider proxying media through the server's `/imgbed/` path so egress is covered by the existing traffic package instead of COS.

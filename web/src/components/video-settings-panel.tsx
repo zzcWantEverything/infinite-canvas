@@ -6,7 +6,7 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
-import { estimateVideoPrice, estimateVideoTokens, videoModelCapability, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
+import { estimateVideoPrice, estimateVideoTokens, videoModelCapability, videoModelDefaultResolution, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
 import { estimateModelPrice } from "@/lib/model-price";
 import { reportApiError } from "@/services/api/http";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -91,6 +91,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         if (selectedRatio === "auto") onConfigChange("vquality", nextResolution);
         else applySize(nextResolution, selectedRatio);
     };
+
+    // 切到「分档价差大」的模型时先落到它最低的一档：这样模型下拉里报的单价和这个面板
+    // 算出的实价是同一个档位（之前下拉按最低档、面板按 720P，30 秒能差 4 元）。
+    // 只在模型变化时纠正一次，之后用户点哪档就按哪档。
+    useEffect(() => {
+        const preferred = videoModelDefaultResolution(modelName);
+        if (!preferred || parseVideoResolution(config.vquality) === preferred) return;
+        selectResolution(preferred);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [modelName]);
 
     return (
         <ImageSettingsTheme theme={theme}>

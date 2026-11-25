@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { App, Button, Input, Tooltip } from "antd";
-import { Activity, Copy, BarChart3, ExternalLink, WalletCards } from "lucide-react";
+import { Activity, Copy, BarChart3, ExternalLink, Ticket, WalletCards } from "lucide-react";
 
 import { fetchAffCode, redeemCode } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
@@ -94,7 +94,19 @@ export default function ProfilePage() {
 
             {/* 兑换码 */}
             <div className="rounded-xl border border-stone-200 bg-white p-5 dark:border-stone-700 dark:bg-stone-900">
-                <div className="mb-3 text-sm font-medium text-stone-700 dark:text-stone-300">🎫 有兑换码吗？</div>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium text-stone-700 dark:text-stone-300">🎫 有兑换码吗？</div>
+                    <a
+                        href="https://wzyp.cn/shop/TBVMF39E"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-800 transition hover:border-stone-400 hover:bg-stone-100 dark:border-stone-600 dark:text-stone-100 dark:hover:border-stone-500 dark:hover:bg-stone-800"
+                    >
+                        <Ticket className="size-4" />
+                        点此获取兑换码
+                        <ExternalLink className="size-4 opacity-70" />
+                    </a>
+                </div>
                 <div className="flex gap-2">
                     <Input
                         value={redeemInput}
@@ -106,18 +118,6 @@ export default function ProfilePage() {
                     <Button type="primary" loading={redeeming} onClick={handleRedeem}>
                         兑换额度
                     </Button>
-                </div>
-                <div className="mt-3 flex items-center gap-1 text-xs text-stone-400 dark:text-stone-500">
-                    需要兑换码？
-                    <a
-                        href="https://wzyp.cn/shop/TBVMF39E"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-0.5 text-stone-500 underline-offset-2 transition hover:text-stone-800 hover:underline dark:text-stone-400 dark:hover:text-stone-200"
-                    >
-                        点此获取
-                        <ExternalLink className="size-3" />
-                    </a>
                 </div>
             </div>
 

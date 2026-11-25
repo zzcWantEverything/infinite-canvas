@@ -13,7 +13,7 @@ import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCata
 import { fetchPricingSnapshot, type PricingModelEntry, type PricingSnapshot } from "@/services/api/pricing";
 import { groupModelOptions } from "@/lib/model-picker-groups";
 import { estimateModelPrice } from "@/lib/model-price";
-import { videoModelCapability } from "@/config/video-models";
+import { videoModelCapability, videoModelDefaultResolution } from "@/config/video-models";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -119,7 +119,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             push(limits.audios, "settingsPanels.model.detailAudios");
             // 价格算不出来（表达式引用了这里不知道的用量）时留空，不猜。
             const entry = pricing?.models.get(name);
-            const estimate = pricing && entry ? estimateOptionPrice(entry, name, pricing.ratio) : null;
+            const estimate = pricing && entry ? estimateOptionPrice(entry, name, pricing.ratio, config.vquality) : null;
             // 算不出具体金额（图片模型按 token 用量计费）时至少说明计费方式，别留空白。
             const price = estimate
                 ? t(estimate.unit === "call" ? "settingsPanels.model.pricePerCall" : "settingsPanels.model.pricePerSecond", { price: formatMoney(estimate.value) })
@@ -129,7 +129,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             if (parts.length || price) summaries.set(option, { detail: parts.join(" · "), price });
         }
         return summaries;
-    }, [options, pricing, catalogVersion, t]);
+    }, [options, pricing, catalogVersion, t, config.vquality]);
 
     // 当有服务器模型列表时，把 current 规范化到列表格式，保证 Radix Select 能找到匹配项。
     const current = useMemo(() => {
@@ -268,11 +268,24 @@ function isVideoModel(name: string): boolean {
     return guessCapability(name) === "video";
 }
 
-function optionResolution(modelName: string, entry: PricingModelEntry) {
+/**
+ * 报哪一档的分辨率价。以前固定取模型最低档，于是「0.18/秒」的下拉报价和面板里
+ * 按 720P 算出来的实价对不上（0.12 vs 0.21）。现在优先用用户在视频面板里当前选的
+ * 档位，模型不支持该档时才退回它自己的最低档。
+ */
+function optionResolution(modelName: string, entry: PricingModelEntry, preferred?: string) {
     const capability = videoModelCapability(modelName);
-    if (capability?.resolutions.length) return capability.resolutions[0];
-    const values = entry.usageSchema?.resolution?.enum;
-    if (Array.isArray(values) && values.length) return values[0].replace(/p$/i, "");
+    const tiers = capability?.resolutions.length
+        ? capability.resolutions
+        : Array.isArray(entry.usageSchema?.resolution?.enum)
+          ? entry.usageSchema.resolution.enum.map((value) => String(value).replace(/p$/i, ""))
+          : [];
+    // 指定了默认档的模型（分档价差大）永远按那一档报价，和选中模型后落到的档位一致。
+    const forced = videoModelDefaultResolution(modelName);
+    if (forced && tiers.includes(forced)) return forced;
+    const wanted = String(preferred || "").replace(/p$/i, "");
+    if (wanted && tiers.includes(wanted)) return wanted;
+    if (tiers.length) return tiers[0];
     return "720";
 }
 
@@ -281,9 +294,9 @@ function optionResolution(modelName: string, entry: PricingModelEntry) {
  * 1 秒和 2 秒一个价，说明这条表达式是一口价（`tier("base", 5.5)` 这种），得按「/次」报，
  * 说成每秒会把用户吓跑；价随时长涨的才按「/秒」报。分辨率越高通常越贵，所以文案带「约」。
  */
-function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio: number): { unit: "call" | "second"; value: number } | null {
+function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio: number, preferredResolution?: string): { unit: "call" | "second"; value: number } | null {
     if (entry.modelPrice > 0) return { unit: "call", value: entry.modelPrice * ratio };
-    const resolution = optionResolution(modelName, entry);
+    const resolution = optionResolution(modelName, entry, preferredResolution);
     const oneSecond = estimateModelPrice(entry, { seconds: 1, resolution });
     if (oneSecond === null || !Number.isFinite(oneSecond) || oneSecond <= 0) {
         // 图片模型按 token 用量计费（p / cr / img / c），前端推不出一次生成用多少 token，
@@ -302,7 +315,7 @@ function estimateOptionPrice(entry: PricingModelEntry, modelName: string, ratio:
     return { unit, value: oneSecond * ratio };
 }
 
-/** 0.045 → "0.045"，0.42 → "0.42"，42.9 → "42.90"：金额最小单位是分，≥0.1 一律两位。 */
+/** 0.045 → "0.045"，0.315 → "0.315"，42.9 → "42.90"：金额最小单位是分，≥1 元一律两位。 */
 /** 目录声明的输出模态优先，没声明时按模型名关键词猜。 */
 function capabilityOf(name: string): ModelCapability {
     const outputs = catalogVariant(name)?.capabilities?.modality?.output;
@@ -329,9 +342,10 @@ function estimateFromCatalogExample(entry: PricingModelEntry, modelName: string,
 
 function formatMoney(value: number) {
     // 展示价都是「表达式 × 分组倍率(1.5)」，常落到 0.735 / 1.245 这种三位小数，
-    // 直接原样打印会出现「约 ¥1.245/秒」这种读不动的数字，这里统一收到分。
-    const rounded = Number(value.toFixed(2));
-    return rounded >= 0.1 ? rounded.toFixed(2) : String(Number(value.toFixed(3)));
+    // 直接原样打印会出现「约 ¥1.245/秒」这种读不动的数字。1 元以上收到分；
+    // 1 元以下保留三位——按秒的单价收成 0.32 再乘 30 秒会比实扣多出 1.6%。
+    const rounded = Number(value.toFixed(3));
+    return rounded >= 1 ? rounded.toFixed(2) : String(Number(value.toFixed(3)));
 }
 
 function ModelLabel({ config, model, label, detail, price }: { config: AiConfig; model: string; label?: string; detail?: string; price?: string }) {

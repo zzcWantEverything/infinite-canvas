@@ -1,10 +1,11 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useState, useSyncExternalStore } from "react";
 import { ConfigProvider, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaRatioOptions, mediaScaleOptions, readMediaDimensions } from "@/lib/media-size";
+import { catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
 import type { AiConfig } from "@/stores/use-config-store";
 
 const qualityOptions = [
@@ -19,6 +20,30 @@ export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.v
 export const imageAspectOptions = mediaRatioOptions.map((item) => ({ value: item.value, label: item.value === "auto" ? i18n.t("settingsPanels.common.auto") : item.value }));
 export const imageScaleOptions = mediaScaleOptions.map((value) => ({ value, label: value === "auto" ? i18n.t("settingsPanels.common.auto") : value }));
 
+/**
+ * 比例选项按模型能力收窄：目录里 `fields.ratio.enum` 就是该模型（更准确说是它当前线路）
+ * 真正支持的画幅。比如 tt-image-2.5-flare 那条线只支持 1:1 / 自适应，banana 系没有 3:2 和 9:21。
+ * 目录没这份声明时才退回香蕉系的写死列表（离线兜底）。
+ */
+const BANANA_ASPECT_RATIOS = new Set(["1:1", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]);
+
+function imageRatioOptions(model: string) {
+    const declared = catalogVariant(model)?.capabilities?.fields?.ratio?.enum;
+    const allowed = Array.isArray(declared) && declared.length ? new Set(declared) : null;
+    if (allowed) return mediaRatioOptions.filter((item) => item.value === "auto" || allowed.has(item.value));
+    const name = String(model || "");
+    const bare = name.includes("::") ? name.slice(name.indexOf("::") + 2) : name;
+    if (!/^banana-/i.test(bare)) return mediaRatioOptions;
+    return mediaRatioOptions.filter((item) => item.value === "auto" || BANANA_ASPECT_RATIOS.has(item.value));
+}
+
+/**
+ * 上游图片模型目前只开放 1K 档（2K/4K 会回「该档位暂未配置价格」）。
+ * 界面先只给 1k / auto，避免用户选了 4K 却拿到 1K 的图、还按错档扣费。
+ * 上游开放更高档位后，把对应值加回这个数组即可。
+ */
+const AVAILABLE_IMAGE_SCALES = ["1k", "auto"];
+
 type ImageSettingsPanelProps = {
     config: AiConfig;
     onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
@@ -31,6 +56,8 @@ type ImageSettingsPanelProps = {
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
+    // 目录是异步拉来的；订阅版本号让比例选项在目录到位后重算一次（能力是按模型声明收窄的）。
+    useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
     const quality = config.quality || "auto";
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -92,7 +119,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.resolution")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {mediaScaleOptions.map((value) => (
+                        {mediaScaleOptions.filter((value) => AVAILABLE_IMAGE_SCALES.includes(value)).map((value) => (
                             <OptionPill key={value} selected={selectedScale === value} theme={theme} onClick={() => selectScale(value)}>
                                 {value === "auto" ? t("settingsPanels.common.auto") : value}
                             </OptionPill>
@@ -102,7 +129,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {mediaRatioOptions.map((item) => (
+                        {imageRatioOptions(config.model).map((item) => (
                             <button
                                 key={item.value}
                                 type="button"

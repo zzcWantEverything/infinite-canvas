@@ -35,6 +35,33 @@ export type ModelPickerGroup = {
 const DISPLAY_SEPARATOR = " · ";
 
 /**
+ * 前端侧的分组覆盖：目录里既没有 variant_group、展示名里也没有「 · 」的模型，
+ * 默认会各自成组，看起来是一堆散落条目。这里按模型名把它们并到指定分组下。
+ *
+ * 灵境（ai.ljvideo.cn）那批特惠版 Seedance 展示名是整串产品名，运营不想改后端
+ * 展示名，所以只在前端把它们并成「特惠优选」一组；取值仍是「渠道::模型名」。
+ */
+const MODEL_GROUP_OVERRIDES: Record<string, string> = {
+    "model-380022936238553345": "特惠优选",
+    "model-380964836437125373": "特惠优选",
+    "model-382943247602802689": "特惠优选",
+    "model-380066518676792496": "特惠优选",
+    "model-381704455537552016": "特惠优选",
+    "model-381747039920187845": "特惠优选",
+    // 2026-11 第二批灵境模型（全模态旗舰、wan3）同样归到这组。
+    "model-383098755454392198": "特惠优选",
+    "model-382599102724038660": "特惠优选",
+    // 2026-11-24 上游轮换后新上架的两条（额度较多版 / 2.0 933）。
+    "model-383550803517893365": "特惠优选",
+    "model-102154015462132391": "特惠优选",
+};
+
+/** 分组标题里已经写了「特惠」，条目名再去掉重复的「特惠版」前缀。 */
+function overrideItemLabel(displayName: string) {
+    return displayName.replace(/^特惠版\s*/, "").trim() || displayName;
+}
+
+/**
  * 把「分组 · 线路名」切成两半。没有分隔符、分隔符在开头或某一半为空时返回 null ——
  * 那种名字（如「Seedance 2.5 官渠」）本来就该整串显示。
  */
@@ -54,6 +81,18 @@ export function groupModelOptions(options: ModelPickerOptionMeta[]): ModelPicker
     const groups = new Map<string, { key: string; label: string; items: Array<{ value: string; label?: string }> }>();
 
     for (const option of options) {
+        const override = MODEL_GROUP_OVERRIDES[option.name];
+        if (override) {
+            const key = `override:${override}`;
+            const displayName = option.variantDisplayName ?? option.card?.displayName ?? option.name;
+            const existing = groups.get(key);
+            if (existing) {
+                existing.items.push({ value: option.value, label: overrideItemLabel(displayName) });
+                continue;
+            }
+            groups.set(key, { key, label: override, items: [{ value: option.value, label: overrideItemLabel(displayName) }] });
+            continue;
+        }
         // 多线路卡片：卡片名就是分组，线路名交给条目。单线路卡片的卡片名和线路名是同一串字，
         // 这时才去看展示名里有没有「分组 · 线路名」的写法。
         const split = option.card && option.card.variantCount <= 1 ? splitModelDisplayName(option.card.displayName) : null;

@@ -5,11 +5,12 @@ import { Group, MousePointerClick, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
-import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
+import { createImageTask, requestEdit, requestGeneration, requestImageQuestion, setImageTaskObserver, waitForImageTask } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
-import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, isVideoTaskPending, pollVideoGenerationTask, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, pollVideoGenerationTask, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { ensureImagePreview, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, imageToDataUrl, uploadImage } from "@/services/image-storage";
+import { catalogVariant } from "@/services/api/model-catalog";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { pushProjectToCloud, repairProjectMediaKeysByLocalId } from "@/services/canvas-cloud-sync";
 import { useCanvasSyncStore } from "@/stores/canvas/use-canvas-sync-store";
@@ -465,11 +466,15 @@ function InfiniteCanvasPage() {
                 );
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
-                const pending = isVideoTaskPending(error);
                 // 上游任务已成功、只是视频文件没下下来（网络拥堵）：不报失败，节点显示「获取中」+ 重试。
                 const mediaPending = isVideoMediaPending(error);
+                // 还能继续查的情况（有任务 ID 且上游没判失败）一律保持「生成中」：
+                // 兜底轮询会接着查，不能让一次网络抖动把节点变成失败态。
+                const liveTaskId = nodesRef.current.find((item) => item.id === node.id)?.metadata?.videoTaskId;
+                const keepPolling = !mediaPending && !isVideoTaskFailed(error) && Boolean(liveTaskId);
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                if (!pending && !mediaPending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
+                // 兜底轮询（silent）失败时不弹 toast，避免每 10 秒弹一次；用户主动触发才提示。
+                if (!mediaPending && !keepPolling && !silent) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -477,8 +482,9 @@ function InfiniteCanvasPage() {
                                   ...item,
                                   metadata: {
                                       ...item.metadata,
-                                      status: pending || mediaPending ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
-                                      errorDetails: pending || (!mediaPending && item.metadata?.content) ? undefined : errorDetails,
+                                      status: mediaPending || keepPolling ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                      // mediaPending 要保留具体原因（下载超时等），节点上会展示
+                                      errorDetails: keepPolling || item.metadata?.content ? undefined : errorDetails,
                                       mediaPending: mediaPending || undefined,
                                       ...(isVideoTaskFailed(error) ? { videoTaskId: undefined } : {}),
                                   },
@@ -678,6 +684,187 @@ function InfiniteCanvasPage() {
         // Resume once after the current canvas is restored, not on later config identity changes.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [projectLoaded]);
+
+    /**
+     * 兜底续查：只要上游没判失败就继续轮询。
+     *
+     * 刷新、切走回来、请求超时、某个轮询循环被取消，都会让「正在查」这件事中断，
+     * 但节点上的 videoTaskId 一直在。这里每 10 秒扫一次：有任务 ID、还没有结果、
+     * 当前又没在轮询的视频节点，重新挂上去查，直到上游返回成功或失败。
+     */
+    /**
+     * 图片任务续查：节点里存着 taskId 的图，说明提交过、还没拿到结果。
+     * 刷新、切页、断网回来都会走到这里，把任务重新接上轮询并回填。
+     */
+    const resumingImageTasksRef = useRef(new Set<string>());
+    const resumeImageTasks = useCallback(
+        async (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Image) return;
+            const pending = (node.metadata?.images || []).filter((item) => item.taskId && item.status === NODE_STATUS_LOADING);
+            if (!pending.length) return;
+            const generationConfig = buildGenerationConfig(effectiveConfig, node, "image");
+            for (const item of pending) {
+                const key = `${node.id}:${item.id}`;
+                if (resumingImageTasksRef.current.has(key)) continue;
+                resumingImageTasksRef.current.add(key);
+                try {
+                    const urls = await waitForImageTask(generationConfig, item.taskId as string);
+                    const blob = await (await fetch(urls[0])).blob();
+                    const uploaded = await uploadImage(blob);
+                    const size = nodeSizeByWidth(uploaded.width, uploaded.height);
+                    setNodes((prev) =>
+                        prev.map((current) => {
+                            if (current.id !== node.id) return current;
+                            const isPrimary = !current.metadata?.primaryImageId && !current.metadata?.content;
+                            return {
+                                ...current,
+                                ...(isPrimary ? size : {}),
+                                metadata: {
+                                    ...current.metadata,
+                                    ...(isPrimary
+                                        ? { content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType, primaryImageId: item.id }
+                                        : {}),
+                                    status: NODE_STATUS_SUCCESS,
+                                    errorDetails: undefined,
+                                    images: current.metadata?.images?.map((image) =>
+                                        image.id === item.id
+                                            ? { ...image, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType, taskId: undefined }
+                                            : image,
+                                    ),
+                                },
+                            };
+                        }),
+                    );
+                } catch {
+                    // 上游还没跑完或网络抖动：保持原状，下一轮兜底再试。
+                } finally {
+                    resumingImageTasksRef.current.delete(key);
+                }
+            }
+        },
+        [effectiveConfig, setNodes],
+    );
+
+    // 图片任务提交成功：照视频的做法，立刻把 id 写进节点元数据并强制落盘。
+    useEffect(() => {
+        setImageTaskObserver((taskId) => {
+            const target = nodesRef.current.find((node) => node.metadata?.status === NODE_STATUS_LOADING && !node.metadata?.content);
+            if (!target) return;
+            forceCloudPushRef.current = true;
+            setNodes((prev) => prev.map((node) => (node.id === target.id ? { ...node, metadata: { ...node.metadata, imageTaskId: taskId } } : node)));
+        });
+        return () => setImageTaskObserver(null);
+    }, [setNodes]);
+
+    /** 图片任务续查：和视频同一套——节点上有 imageTaskId、还没内容，就一直查到出图。 */
+    const resumeImageTaskById = useCallback(
+        async (node: CanvasNodeData) => {
+            const taskId = node.metadata?.imageTaskId;
+            if (!taskId) return;
+            const key = `task:${node.id}`;
+            if (resumingImageTasksRef.current.has(key)) return;
+            resumingImageTasksRef.current.add(key);
+            try {
+                const generationConfig = buildGenerationConfig(effectiveConfig, node, "image");
+                const urls = await waitForImageTask(generationConfig, taskId);
+                const blob = await (await fetch(urls[0])).blob();
+                const uploaded = await uploadImage(blob);
+                const size = nodeSizeByWidth(uploaded.width, uploaded.height);
+                forceCloudPushRef.current = true;
+                setNodes((prev) =>
+                    prev.map((current) =>
+                        current.id === node.id
+                            ? {
+                                  ...current,
+                                  ...size,
+                                  metadata: {
+                                      ...current.metadata,
+                                      content: uploaded.url,
+                                      storageKey: uploaded.storageKey,
+                                      naturalWidth: uploaded.width,
+                                      naturalHeight: uploaded.height,
+                                      bytes: uploaded.bytes,
+                                      mimeType: uploaded.mimeType,
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                      imageTaskId: undefined,
+                                  },
+                              }
+                            : current,
+                    ),
+                );
+            } catch {
+                // 还没好：保持 pending，下一轮兜底再查
+            } finally {
+                resumingImageTasksRef.current.delete(key);
+            }
+        },
+        [effectiveConfig, setNodes],
+    );
+
+
+    /** 续查图片 pending 任务：轮询到结果就回填节点，并从待查列表里摘掉。 */
+    const resumeImagePendingTasks = useCallback(
+        async (node: CanvasNodeData) => {
+            const pending = node.metadata?.imagePendingTasks || [];
+            if (!pending.length) return;
+            const generationConfig = buildGenerationConfig(effectiveConfig, node, "image");
+            for (const item of pending) {
+                const key = `${node.id}:${item.taskId}`;
+                if (resumingImageTasksRef.current.has(key)) continue;
+                resumingImageTasksRef.current.add(key);
+                try {
+                    const urls = await waitForImageTask(generationConfig, item.taskId);
+                    const blob = await (await fetch(urls[0])).blob();
+                    const uploaded = await uploadImage(blob);
+                    const size = nodeSizeByWidth(uploaded.width, uploaded.height);
+                    setNodes((prev) =>
+                        prev.map((current) => {
+                            if (current.id !== node.id) return current;
+                            const image = { id: `img-${item.taskId}`, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
+                            return {
+                                ...current,
+                                ...size,
+                                metadata: {
+                                    ...current.metadata,
+                                    content: uploaded.url,
+                                    storageKey: uploaded.storageKey,
+                                    naturalWidth: uploaded.width,
+                                    naturalHeight: uploaded.height,
+                                    bytes: uploaded.bytes,
+                                    mimeType: uploaded.mimeType,
+                                    status: NODE_STATUS_SUCCESS,
+                                    errorDetails: undefined,
+                                    primaryImageId: (current.metadata?.images || []).length === 0 ? image.id : current.metadata?.primaryImageId || image.id,
+                                    images: [...(current.metadata?.images || []).filter((entry) => entry.id !== image.id), image],
+                                    imagePendingTasks: (current.metadata?.imagePendingTasks || []).filter((entry) => entry.taskId !== item.taskId),
+                                },
+                            };
+                        }),
+                    );
+                } catch {
+                    // 还没好或网络抖动：保留，下一轮兜底继续
+                } finally {
+                    resumingImageTasksRef.current.delete(key);
+                }
+            }
+        },
+        [effectiveConfig, setNodes],
+    );
+
+    useEffect(() => {
+        if (!projectLoaded) return;
+        const timer = window.setInterval(() => {
+            for (const node of nodesRef.current) {
+                if (node.type === CanvasNodeType.Image) void resumeImageTaskById(node);
+                if (node.type === CanvasNodeType.Image) void resumeImageTasks(node);
+                if (!hasResumableVideoTask(node)) continue;
+                if (videoPollIdsRef.current.has(node.id) || generationRequestsRef.current.has(node.id)) continue;
+                void pollVideoNodeTask(node, true);
+            }
+        }, 10000);
+        return () => window.clearInterval(timer);
+    }, [pollVideoNodeTask, projectLoaded, resumeImagePendingTasks, resumeImageTasks]);
 
     useEffect(() => {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
@@ -2722,13 +2909,46 @@ function InfiniteCanvasPage() {
                     let hasSuccess = false;
                     let hasFailure = false;
                     let firstError = "";
+                    // 任务化出图：目录里 invocation=task 的模型走网关任务接口，一张图一个任务 ID。
+                    // 同步请求刷新即断、拿不到 ID，这是「刷新后生成已中断」的根因。
+                    const isTaskImage = catalogVariant(generationConfig.model)?.capabilities?.invocation === "task";
                     await Promise.all(
                         imageIds.map(async (imageId) => {
                             try {
-                                const image = referenceImages.length
-                                    ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
-                                    : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                                let uploaded: Awaited<ReturnType<typeof uploadImage>>;
+                                if (isTaskImage) {
+                                    // 上游只认可抓取的地址（data URL 会报「参考图不是有效图片文件」）。
+                                    // 上游认 Base64 Data URL（也认 http 直链），直接内联，不依赖云同步。
+                                    const referenceUrls = (await Promise.all(referenceImages.map((item) => imageToDataUrl(item)))).filter(Boolean);
+                                    const taskId = await createImageTask(
+                                        generationConfig,
+                                        {
+                                            model: generationConfig.model,
+                                            prompt: effectivePrompt,
+                                            ...(generationConfig.size ? { size: generationConfig.size } : {}),
+                                            ...(referenceUrls.length ? { images: referenceUrls } : {}),
+                                        },
+                                        { signal: controller.signal },
+                                    );
+                                    setNodes((prev) =>
+                                        prev.map((node) =>
+                                            node.id === rootId
+                                                ? {
+                                                      ...node,
+                                                      metadata: { ...node.metadata, images: node.metadata?.images?.map((item) => (item.id === imageId ? { ...item, taskId } : item)) },
+                                                  }
+                                                : node,
+                                        ),
+                                    );
+                                    const urls = await waitForImageTask(generationConfig, taskId, { signal: controller.signal });
+                                    const blob = await (await fetch(urls[0])).blob();
+                                    uploaded = await uploadImage(blob);
+                                } else {
+                                    const image = referenceImages.length
+                                        ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, { signal: controller.signal }).then((items) => items[0])
+                                        : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
+                                    uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                                }
                                 const imageSize = nodeSizeByWidth(uploaded.width, uploaded.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
@@ -2993,9 +3213,10 @@ function InfiniteCanvasPage() {
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                const pending = isVideoTaskPending(error);
                 const mediaPending = isVideoMediaPending(error);
-                if (!pending && !mediaPending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
+                const hasTaskId = Boolean(nodesRef.current.find((item) => item.id === nodeId)?.metadata?.videoTaskId);
+                const keepPolling = !mediaPending && !isVideoTaskFailed(error) && hasTaskId;
+                if (!mediaPending && !keepPolling) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((node) =>
                         node.id === nodeId || pendingChildIds.includes(node.id)
@@ -3005,8 +3226,8 @@ function InfiniteCanvasPage() {
                                       ...node,
                                       metadata: {
                                           ...node.metadata,
-                                          status: pending || mediaPending ? NODE_STATUS_PENDING : NODE_STATUS_ERROR,
-                                          errorDetails: pending ? undefined : errorDetails,
+                                          status: mediaPending || keepPolling ? NODE_STATUS_PENDING : NODE_STATUS_ERROR,
+                                          errorDetails: mediaPending || keepPolling ? undefined : errorDetails,
                                           mediaPending: mediaPending || undefined,
                                           ...(isVideoTaskFailed(error) && node.type === CanvasNodeType.Video ? { videoTaskId: undefined } : {}),
                                       },
@@ -3154,8 +3375,9 @@ function InfiniteCanvasPage() {
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                const pending = isVideoTaskPending(error);
-                if (!pending) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
+                const mediaPending = isVideoMediaPending(error);
+                const keepPolling = !mediaPending && !isVideoTaskFailed(error) && Boolean(node.metadata?.videoTaskId);
+                if (!mediaPending && !keepPolling) notifyGenerationFailure(message, errorDetails, t("contentSafety.blockedToast"));
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -3163,9 +3385,9 @@ function InfiniteCanvasPage() {
                                   ...item,
                                   metadata: {
                                       ...item.metadata,
-                                      status: pending ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
-                                      errorDetails: pending || item.metadata?.content ? undefined : errorDetails,
-                                      images: pending ? item.metadata?.images : item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)),
+                                      status: mediaPending || keepPolling ? NODE_STATUS_PENDING : item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                      errorDetails: mediaPending || keepPolling || item.metadata?.content ? undefined : errorDetails,
+                                      images: mediaPending || keepPolling ? item.metadata?.images : item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)),
                                       ...(isVideoTaskFailed(error) && item.type === CanvasNodeType.Video ? { videoTaskId: undefined } : {}),
                                   },
                               }

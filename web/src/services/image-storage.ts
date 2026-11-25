@@ -142,6 +142,31 @@ function throwIfAborted(signal?: AbortSignal) {
     if (signal?.aborted) throw abortReason(signal);
 }
 
+/**
+ * 取一份「上游能抓到的」公网地址，给任务化提交用。
+ *
+ * 上游只认能抓取的图片地址（data URL 会被判「参考图不是有效图片文件」），
+ * 所以参考图必须先在 COS 上；本地还没对象键的，这里补传一次再换签名 URL。
+ */
+export async function imagePublicUrl(storageKey?: string): Promise<string> {
+    if (!storageKey) return "";
+    if (storageKey.startsWith("media/")) {
+        const urls = (await getCloudMediaUrls([storageKey]).catch(() => null)) ?? {};
+        return urls[storageKey] || "";
+    }
+    let objectKey = await objectKeyFor(storageKey);
+    if (!objectKey && isCloudEnabled()) {
+        const blob = await store.getItem<Blob>(storageKey);
+        if (blob) {
+            objectKey = await uploadToCloud(blob, "image", blob.type || "image/png");
+            await recordObjectKey(storageKey, objectKey);
+        }
+    }
+    if (!objectKey) return "";
+    const urls = (await getCloudMediaUrls([objectKey]).catch(() => null)) ?? {};
+    return urls[objectKey] || "";
+}
+
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
     // 云端对象键：换设备加载后 doc 里的 storageKey 直接就是 objectKey。

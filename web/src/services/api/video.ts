@@ -4,12 +4,13 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import { sha256Hex } from "@/lib/hash";
+import { maxImageReferenceIndex } from "@/lib/image-reference-prompt";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution } from "@/lib/media-size";
 import { estimateVideoPrice, clampSecondsToModel, videoModelCapability, type VideoModelCapability } from "@/config/video-models";
 import { fetchModelCatalog } from "@/services/api/model-catalog";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { readApiErrorMessage, readAxiosError } from "./http";
+import { readAxiosError, readFailureMessage } from "./http";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { runModelPlugin } from "./model-plugin";
@@ -57,32 +58,18 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
  *（controller/system_task_handlers.go 的 asyncTaskPollHandler.Interval），
  * 前端比这更密只会空转，既不给用户更早的结果，又多打了网关。
  *
- * 等满 90 分钟仍没结束时不再判失败——上游 Seedance 2.5 长镜头实测能跑 1 小时以上。
- * 这时抛 VideoTaskPending，由画布把节点切成「后台运行中」并保留 task ID，随时可续查。
+ * 只要上游没判失败就一直查：过去跑到 90 分钟会转「后台运行」，用户以为任务卡住，
+ * 实际上游还在跑。取消任务只能由上游返回 failed/cancelled，前端不自己放弃。
  */
 export const VIDEO_POLL_INTERVAL = 15000;
-export const VIDEO_POLL_BACKGROUND_AFTER = 90 * 60 * 1000;
-
-export function isVideoTaskPending(error: unknown) {
-    return error instanceof Error && error.name === "VideoTaskPending";
-}
-
-/** 任务还在上游跑，但前端不再干等：节点转后台运行中，task ID 保留。 */
-function videoTaskPending() {
-    const error = new Error(apiText("videoTimeout", { provider: "" }));
-    error.name = "VideoTaskPending";
-    return error;
-}
 
 export async function waitForVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult> {
-    const deadline = Date.now() + VIDEO_POLL_BACKGROUND_AFTER;
     for (;;) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "media_pending") throw videoMediaPending(state.error);
         if (state.status === "failed") throw videoTaskFailed(state.error);
-        if (Date.now() >= deadline) throw videoTaskPending();
         await delay(VIDEO_POLL_INTERVAL, options?.signal);
     }
 }
@@ -127,6 +114,15 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const readyConfig = await prepareVideoSeconds(config);
     const selectedModel = (readyConfig.model || readyConfig.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(readyConfig, selectedModel);
+    // 提示词里的「图片N」必须落在实际上传的图片数量内：上游按编号校验素材，
+    // 越界直接 502（「提示词引用了 [图9]，但只提供了 8 个」），本地先拦下来，
+    // 别让用户为一次必然失败的请求等一轮轮询。
+    if (references.length > 0) {
+        const capability = videoModelCapability(requestConfig.model);
+        const sendable = capability?.maxImages ? Math.min(references.length, capability.maxImages) : references.length;
+        const referenced = maxImageReferenceIndex(prompt);
+        if (referenced > sendable) throw new Error(apiText("promptImageReferenceOutOfRange", { index: referenced, count: sendable }));
+    }
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
@@ -268,7 +264,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
                 return { status: "media_pending", error: apiText("videoMediaPending") };
             }
         }
-        if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+        if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readFailureMessage(video.error?.message, apiText("videoGenerationFailed")) };
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
@@ -330,7 +326,7 @@ async function createGeminiVideoTask(config: AiConfig, model: string, prompt: st
 async function pollGeminiVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         const state = unwrapEnvelope((await axios.get<ApiEnvelope<GeminiVideoOperation>>(geminiOperationUrl(config, task.id), { headers: geminiVideoHeaders(config), signal: options?.signal })).data, apiText("videoTaskQueryFailed"));
-        if (state.error) return { status: "failed", error: readApiErrorMessage(state.error.message) || apiText("videoGenerationFailed") };
+        if (state.error) return { status: "failed", error: readFailureMessage(state.error.message, apiText("videoGenerationFailed")) };
         if (!state.done) return { status: "pending" };
         const uri = state.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
         if (!uri) return { status: "failed", error: apiText("noPlayableVideo") };
@@ -386,7 +382,7 @@ async function pollArkVideoTask(config: AiConfig, task: VideoGenerationTask, opt
         );
         const url = videoResultUrl(state);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
-        if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: readApiErrorMessage(state.error?.message) || apiText("videoGenerationFailed") };
+        if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: readFailureMessage(state.error?.message, apiText("videoGenerationFailed")) };
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
@@ -566,7 +562,7 @@ async function pollQoraVideoTask(config: AiConfig, task: VideoGenerationTask, op
         const url = videoResultUrl(video);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (video.status === "failed" || video.status === "cancelled" || video.status === "FAILURE") {
-            return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+            return { status: "failed", error: readFailureMessage(video.error?.message, apiText("videoGenerationFailed")) };
         }
         return { status: "pending" };
     } catch (error) {
@@ -728,7 +724,7 @@ function unwrapVideoResponse(payload: ApiVideoResponse) {
 function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     if (!payload) throw new Error(emptyMessage);
     if (typeof payload === "object" && "code" in payload && payload.code !== undefined) {
-        if (payload.code !== 0 && payload.code !== "0") throw new Error(readApiErrorMessage(payload) || apiText("requestFailed"));
+        if (payload.code !== 0 && payload.code !== "0") throw new Error(readFailureMessage(payload, apiText("requestFailed")));
         if (!payload.data) throw new Error(emptyMessage);
         return payload.data;
     }
@@ -747,8 +743,8 @@ async function assertVideoBlob(blob: Blob) {
     } catch {
         return;
     }
-    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(readApiErrorMessage(payload) || apiText("videoDownloadFailed"));
-    if (payload.error?.message) throw new Error(readApiErrorMessage(payload.error.message) || payload.error.message);
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(readFailureMessage(payload, apiText("videoDownloadFailed")));
+    if (payload.error?.message) throw new Error(readFailureMessage(payload.error.message, apiText("videoDownloadFailed")));
 }
 
 function isPublicMediaUrl(value: string) {

@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
-import { videoModelCapability } from "@/config/video-models";
+import { videoModelCapability, videoModelDefaultResolution } from "@/config/video-models";
+import { computeVideoSize, inferVideoRatio } from "@/lib/media-size";
 import { catalogGroupOf, catalogVariant } from "@/services/api/model-catalog";
 
 import i18n from "@/i18n";
@@ -154,10 +155,10 @@ export const defaultConfig: AiConfig = {
     reasoningEffort: "auto",
     models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
     quality: "auto",
-    size: "1:1",
+    size: "16:9",
     background: "",
     count: "1",
-    canvasImageCount: "3",
+    canvasImageCount: "1",
     proxyEnabled: false,
     proxyUrl: DEFAULT_LOCAL_PROXY_URL,
     imgbedUrl: "/imgbed",
@@ -282,12 +283,21 @@ export const useConfigStore = create<ConfigStore>()(
             configTab: "channels",
             shouldPromptContinue: false,
             updateConfig: (key, value) =>
-                set((state) => ({
-                    config: {
-                        ...state.config,
-                        [key]: value,
-                    },
-                })),
+                set((state) => {
+                    const config = { ...state.config, [key]: value };
+                    // 切到「按分辨率分档计价」的模型时落到它的默认档：模型下拉报的是这一档的价，
+                    // 不跟着切的话用户看到的单价和实际扣费会差一倍。
+                    if (key === "videoModel") {
+                        const raw = String(value ?? "");
+                        const bare = raw.includes("::") ? raw.slice(raw.indexOf("::") + 2) : raw;
+                        const preferred = videoModelDefaultResolution(bare);
+                        if (preferred && preferred !== String(config.vquality)) {
+                            config.vquality = preferred;
+                            config.size = computeVideoSize(preferred, inferVideoRatio(config.size || "auto"));
+                        }
+                    }
+                    return { config };
+                }),
             importChannelCredentials: (input) => {
                 const currentConfig = get().config;
                 const result = upsertChannelCredentials(currentConfig, input);
@@ -308,6 +318,19 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
+            // v1：图片默认比例从 1:1 改成 16:9。只把仍是旧默认值的配置升上来，
+            // 用户自己选过 1:1 的话能在 v0→v1 之后保持不变（迁移只跑一次）。
+            version: 2,
+            migrate: (persisted, oldVersion) => {
+                const state = persisted as { config?: Partial<AiConfig> } | undefined;
+                if (!state?.config) return state;
+                let config = { ...state.config };
+                // v0 → v1：图片默认比例 1:1 → 16:9
+                if (oldVersion < 1 && config.size === "1:1") config = { ...config, size: "16:9" };
+                // v1 → v2：图片默认张数 3 → 1（只改老默认值，用户选过的不动）
+                if (oldVersion < 2 && config.canvasImageCount === "3") config = { ...config, canvasImageCount: "1" };
+                return { ...state, config };
+            },
             partialize: (state) => ({ config: state.config, webdav: state.webdav }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
@@ -346,7 +369,7 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         videoMode: config.videoMode === "reference" ? "reference" : "frames",
-                        canvasImageCount: config.canvasImageCount || "3",
+                        canvasImageCount: config.canvasImageCount || "1",
                         proxyEnabled: Boolean(config.proxyEnabled),
                         proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
                     },

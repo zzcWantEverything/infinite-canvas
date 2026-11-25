@@ -1,5 +1,7 @@
 import { getNodeSpec, NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
+import { computeVideoSize, inferVideoRatio } from "@/lib/media-size";
+import { videoModelDefaultResolution } from "@/config/video-models";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { UploadedImage } from "@/services/image-storage";
 import type { UploadedFile } from "@/services/file-storage";
@@ -63,7 +65,18 @@ export function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetada
 }
 
 export function applyNodeConfigPatch(node: CanvasNodeData, patch: Partial<CanvasNodeData["metadata"]>) {
-    const safePatch = patch || {};
+    const safePatch = { ...(patch || {}) };
+    // 选中「按分辨率分档计价」的模型时，一并落到它的默认分辨率档。
+    // 不落档的话，模型下拉报的是低档价、真正提交却按当前高档扣费。
+    if (node.type === CanvasNodeType.Video && typeof safePatch.model === "string" && safePatch.vquality === undefined) {
+        const bare = safePatch.model.includes("::") ? safePatch.model.slice(safePatch.model.indexOf("::") + 2) : safePatch.model;
+        const preferred = videoModelDefaultResolution(bare);
+        if (preferred) {
+            const ratio = inferVideoRatio(safePatch.size || node.metadata?.size || "auto");
+            safePatch.vquality = preferred;
+            safePatch.size = computeVideoSize(preferred, ratio);
+        }
+    }
     const next = { ...node, metadata: { ...node.metadata, ...safePatch } };
     const spec = node.type === CanvasNodeType.Video ? NODE_DEFAULT_SIZE[CanvasNodeType.Video] : NODE_DEFAULT_SIZE[CanvasNodeType.Image];
     const size = typeof safePatch.size === "string" && !node.metadata?.content ? nodeSizeFromRatio(safePatch.size, spec.width, spec.height) : null;
