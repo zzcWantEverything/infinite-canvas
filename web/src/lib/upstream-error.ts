@@ -20,6 +20,9 @@ const UPSTREAM_PRICE_PATTERN =
 /** 只有对接人看得懂的内部文案：渠道号、upstream、原始 JSON 结构、curl 示例。 */
 const UPSTREAM_INTERNAL_PATTERN = /(channel\s*#|status_code\s*=|"detail"\s*:|curl\s+-F|images\[\]|"request_id"|上游|渠道号|not served by|可传渠道)/i;
 
+// 用户自己账户没钱：必须原样告诉用户，不能被下面的价格/线路规则吞掉。
+const INSUFFICIENT_BALANCE_PATTERN = /(余额不足|额度不足|额度不够|余额不够|剩余额度|预扣费|欠费|请充值|充值后|insufficient\s+(?:balance|quota|credit)|not\s+enough\s+(?:quota|balance)|quota\s+is\s+not\s+enough|balance\s+is\s+not\s+enough)/i;
+
 const CONTENT_BLOCKED_PATTERN = /(审核|安全策略|内容安全|违规|content\s*policy|safety\s*system|sensitive)/i;
 const TIMEOUT_PATTERN = /(超时|timeout|timed?\s*out|deadline|未能在截止)/i;
 const BUSY_PATTERN = /(限流|繁忙|过热|过载|负载|容量不足|并发|排队|rate\s*limit|overload|too\s*many\s*requests|系统繁忙)/i;
@@ -58,6 +61,7 @@ export function humanizeUpstreamError(message: string): string {
     if (HTML_DOC_PATTERN.test(text)) return apiText("pleaseRetryLater");
     if (UPSTREAM_IMAGE_REFERENCE_PATTERNS.some((pattern) => pattern.test(text))) return apiText("imageReferenceMismatch");
     // 价格必须先判：它可能同时命中「繁忙」之类的词，但一旦露价就没法收回。
+    if (INSUFFICIENT_BALANCE_PATTERN.test(text)) return apiText("insufficientBalance");
     if (UPSTREAM_PRICE_PATTERN.test(text)) return apiText("upstreamLineUnavailable");
     if (CONTENT_BLOCKED_PATTERN.test(text)) return apiText("contentBlocked");
     if (TIMEOUT_PATTERN.test(text)) return apiText("generationTimeout");
