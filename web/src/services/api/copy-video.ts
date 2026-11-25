@@ -1,7 +1,7 @@
 import axios from "axios";
 
 import { buildApiUrl, type AiConfig } from "@/stores/use-config-store";
-import { requestGeneration } from "@/services/api/image";
+import { requestEdit, requestGeneration } from "@/services/api/image";
 import { readAxiosError } from "@/services/api/http";
 import { VIDEO_POLL_INTERVAL, createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo } from "@/services/api/video";
 import type { UploadedFile } from "@/services/file-storage";
@@ -36,6 +36,8 @@ export type CopyShot = {
     dialogue: string;
     /** 画面文字：口播字幕 / 活动价签 / 身份条 / 招牌 / 包装，含位置与时间 */
     onScreenText: string;
+    /** 生成该镜首帧用的图片描述词（可编辑，批量「生成图片描述词」写入） */
+    imagePrompt: string;
     roles: string[];
     scenes: string[];
     items: string[];
@@ -45,6 +47,8 @@ export type CopyAnalysis = {
     title: string;
     /** 画面比例，如 9:16 */
     ratio: string;
+    /** 全片统一的画风/影调/质感描述，生图与生视频都会带上 */
+    style: string;
     roles: CopyItem[];
     scenes: CopyItem[];
     items: CopyItem[];
@@ -212,7 +216,11 @@ ${batchContext(batch)}
 区分口播字幕、活动价签、人物身份条、背景招牌和产品包装，记录它们的出现位置和时间。
 只有画面出现的数字留在画面栏（description / onScreenText），只有实际说出的内容才放进口播或旁白，两者不要混。
 
-五、输出前自检
+五、风格与图片描述词
+- style：用一句话概括全片统一的画风、影调、光线和质感（例如「电影感写实，暖调侧光，浅景深，画面偏胶片颗粒」）。这条风格会拼进每张参考图和每个分镜提示词，必须写具体，不要写「很好看」这类空话。
+- 每镜的 imagePrompt：写给生图模型用的该镜首帧提示词，按「画面主体与动作 → 人物位置与朝向 → 场景与道具 → 景别机位光线 → 风格」的顺序写成一段，150 字以内；直接引用角色/场景/物品的名字，不要写「分镜 N」「如上」这类引用。
+
+六、输出前自检
 - 时间轴是否覆盖全片：首镜从 0.0 秒开始，末镜到视频结束，镜头之间不留空档。
 - 宫格里每个场景切换至少对应一个分镜，不要好几个场景合并成一镜。
 - 台词有无漏写或重复；跨镜头的同一句是否只写了一次。
@@ -226,6 +234,7 @@ ${batchContext(batch)}
 {
   "title": "一句话概括视频主题",
   "ratio": "画面比例，如 9:16",
+  "style": "全片统一的画风/影调/光线/质感，一句话",
   "roles": [{ "name": "角色名", "description": "外观、服装、发型、气质等可复用于生图的描述" }],
   "scenes": [{ "name": "场景名", "description": "地点、光线、环境布置等可复用于生图的描述" }],
   "items": [{ "name": "物品名", "description": "外观、材质、颜色等可复用于生图的描述" }],
@@ -242,6 +251,7 @@ ${batchContext(batch)}
     "sound": "声音：🔵【人物口播／对白｜人物名】或 🟠【画外旁白｜声线归属】，以及环境声、操作音效，含说话人与起止位置",
     "dialogue": "该镜头对应的台词/口播原文（没有则为空字符串）",
     "onScreenText": "画面文字：口播字幕/活动价签/人物身份条/背景招牌/产品包装，记录内容、位置与出现时间（没有则为空字符串）",
+    "imagePrompt": "该镜首帧的图片描述词，150 字以内",
     "roles": ["该镜头出现的角色名"],
     "scenes": ["该镜头所在场景名"],
     "items": ["该镜头出现的关键物品名"]
@@ -588,12 +598,73 @@ export async function transcribeAudio(baseUrl: string, sessionToken: string, wav
     return String(data.text || "").trim();
 }
 
-/** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。 */
-export async function generateItemImage(config: AiConfig, item: CopyItem, signal?: AbortSignal): Promise<string> {
-    const prompt = [item.name, item.description].filter(Boolean).join("，");
+/** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。提示词由调用方按素材类型拼好。 */
+export async function generateItemImage(config: AiConfig, prompt: string, signal?: AbortSignal): Promise<string> {
     const images = await requestGeneration({ ...config, count: "1" }, prompt, { signal });
     if (!images.length) throw new Error("生图没有返回结果");
     return images[0].dataUrl;
+}
+
+/** 分镜 → 生成该镜首帧图（返回 dataUrl）；有参考图时走图生图，人物和场景更贴近原片。 */
+export async function generateShotImage(config: AiConfig, shot: CopyShot, references: ReferenceImage[] = [], style = "", signal?: AbortSignal): Promise<string> {
+    const prompt = shotImagePrompt(shot, style);
+    const images = references.length
+        ? await requestEdit({ ...config, count: "1" }, prompt, references, { signal })
+        : await requestGeneration({ ...config, count: "1" }, prompt, { signal });
+    if (!images.length) throw new Error("生图没有返回结果");
+    return images[0].dataUrl;
+}
+
+/** 分镜图提示词：优先用模型写好的 imagePrompt，没有就按分镜字段拼一段。 */
+export function shotImagePrompt(shot: CopyShot, style = ""): string {
+    const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
+    const body = shot.imagePrompt || [camera, shot.description, shot.performance].filter(Boolean).join("。");
+    return [style ? `风格：${style}` : "", body].filter(Boolean).join("\n");
+}
+
+/**
+ * 批量「生成图片描述词」：把分镜已有的画面/镜头/角色字段拼成一条可直接生图的提示词，
+ * 用于模型漏写 imagePrompt 时补全（和参考产品一样，可以再手动改）。
+ */
+export function composeShotImagePrompt(shot: CopyShot, analysis: CopyAnalysis): string {
+    const describe = (names: string[], list: CopyItem[]) =>
+        names
+            .map((name) => {
+                const item = list.find((entry) => entry.name === name);
+                return item && item.description ? `${item.name}（${item.description}）` : name;
+            })
+            .filter(Boolean)
+            .join("；");
+    const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
+    const lines = [
+        analysis.style ? `风格：${analysis.style}` : "",
+        camera ? `镜头：${camera}` : "",
+        shot.description ? `画面：${shot.description}` : "",
+        shot.roles.length ? `角色：${describe(shot.roles, analysis.roles)}` : "",
+        shot.scenes.length ? `场景：${describe(shot.scenes, analysis.scenes)}` : "",
+        shot.items.length ? `物品：${describe(shot.items, analysis.items)}` : "",
+    ];
+    return lines.filter(Boolean).join("\n");
+}
+
+/** 每个分镜配一张「原视频分镜图」：按分镜起始时间取最近的抽帧。 */
+export function matchFramesToShots(analysis: CopyAnalysis, frames: CopyFrame[]): Record<string, string> {
+    const map: Record<string, string> = {};
+    if (!frames.length) return map;
+    for (const shot of analysis.shots) {
+        const start = shotStartSeconds(shot.start);
+        let best = frames[0];
+        let delta = Math.abs(best.time - start);
+        for (const frame of frames) {
+            const next = Math.abs(frame.time - start);
+            if (next < delta) {
+                best = frame;
+                delta = next;
+            }
+        }
+        map[shot.id] = best.dataUrl;
+    }
+    return map;
 }
 
 /** 分镜 → 生成一段视频（首帧参考图可选），返回已入库的素材（url + storageKey）。 */
@@ -601,9 +672,10 @@ export async function generateShotVideo(
     config: AiConfig,
     shot: CopyShot,
     references: ReferenceImage[] = [],
+    style = "",
     signal?: AbortSignal,
 ): Promise<UploadedFile> {
-    const prompt = shotPrompt(shot);
+    const prompt = shotPrompt(shot, style);
     const task = await createVideoGenerationTask(config, prompt, references, { signal });
     for (;;) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -620,9 +692,16 @@ export async function generateShotVideo(
  * 分镜 → 视频提示词。按「镜头语言 → 画面 → 表演 → 台词/画面文字」拼，
  * 景别/机位/运动单独成句，避免和画面描述混在一起被模型忽略。
  */
-export function shotPrompt(shot: CopyShot): string {
+export function shotPrompt(shot: CopyShot, style = ""): string {
     const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
-    const lines = [camera ? `镜头：${camera}` : "", shot.description ? `画面：${shot.description}` : "", shot.performance ? `表演：${shot.performance}` : "", shot.dialogue ? `台词：${shot.dialogue}` : "", shot.onScreenText ? `画面文字：${shot.onScreenText}` : ""];
+    const lines = [
+        style ? `风格：${style}` : "",
+        camera ? `镜头：${camera}` : "",
+        shot.description ? `画面：${shot.description}` : "",
+        shot.performance ? `表演：${shot.performance}` : "",
+        shot.dialogue ? `台词：${shot.dialogue}` : "",
+        shot.onScreenText ? `画面文字：${shot.onScreenText}` : "",
+    ];
     const prompt = lines.filter(Boolean).join("\n");
     return prompt || shot.description || "复刻原片镜头的画面与运镜";
 }
@@ -748,6 +827,7 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
                     sound: text("sound"),
                     dialogue: text("dialogue"),
                     onScreenText: text("onScreenText"),
+                    imagePrompt: text("imagePrompt"),
                     roles: asList(record.roles),
                     scenes: asList(record.scenes),
                     items: asList(record.items),
@@ -757,6 +837,7 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     return {
         title: String(raw.title ?? "").trim() || "爆款转绘",
         ratio: String(raw.ratio ?? "").trim(),
+        style: String(raw.style ?? "").trim(),
         roles: toItems(raw.roles, "roles"),
         scenes: toItems(raw.scenes, "scenes"),
         items: toItems(raw.items, "items"),
@@ -832,6 +913,7 @@ export function mergeBatchAnalyses(results: CopyAnalysis[]): CopyAnalysis {
     return {
         title: valid.find((result) => result.title)?.title ?? "",
         ratio: valid.find((result) => result.ratio)?.ratio ?? "",
+        style: valid.find((result) => result.style)?.style ?? "",
         roles: mergeList("roles"),
         scenes: mergeList("scenes"),
         items: mergeList("items"),
