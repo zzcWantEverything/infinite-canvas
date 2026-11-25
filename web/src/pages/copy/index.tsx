@@ -49,6 +49,7 @@ import {
     outlineForWindow,
     parseTranscript,
     sampleFrames,
+    spreadTranscript,
     sanitizeItemIds,
     transcribeAudio,
     transcriptForWindow,
@@ -319,7 +320,9 @@ export default function CopyVideoPage() {
             } catch (e) {
                 transcriptError = e instanceof Error ? e.message : "转写失败";
             }
-            const segments = parseTranscript(rawTranscript);
+            // 腾讯有时整段只返回一句、甚至没有时间戳：能解析就按句拆，解析不了就按句均分到全片时长。
+            let segments = parseTranscript(rawTranscript);
+            if (!segments.length && rawTranscript.trim()) segments = spreadTranscript(rawTranscript, meta.duration);
             setAnalysisPercent(15);
             // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格。
             setAnalysisStage("overview");
@@ -329,7 +332,6 @@ export default function CopyVideoPage() {
             setAnalysisPercent(25);
             // 4) 第二步：按时间窗逐段细化，串行——后面的窗要吃前面窗定下的资产和收尾状态。
             const windows = groupFramesIntoWindows(frames, 12);
-            const untimedTranscript = segments.length ? "" : String(rawTranscript || "").trim().slice(0, 1200);
             let result: CopyAnalysis | null = null;
             let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
             let previousEndState = "";
@@ -352,8 +354,9 @@ export default function CopyVideoPage() {
                         endTime,
                         cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
                         casting,
-                        // 有带时间戳的转写就只给本窗台词；解析不到时间戳时退回整段（截断），至少别让台词全丢。
-                        transcript: transcriptForWindow(segments, startTime, endTime) || untimedTranscript,
+                        // 只给本窗自己的台词：解析不到时间戳时已经按句均分过，这里不再整段回退，
+                        // 否则同一句会在每个窗口各写一遍。
+                        transcript: transcriptForWindow(segments, startTime, endTime),
                         outline: outlineForWindow(overview.outline, startTime, endTime),
                         previousDialogue: usedDialogue.slice(-3).join("；").slice(0, 600),
                         previousEndState,
