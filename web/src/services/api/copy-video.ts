@@ -1161,7 +1161,7 @@ export function dropRepeatedDialogue(analysis: CopyAnalysis): CopyAnalysis {
 }
 
 /** 时间码归一成秒：支持 "1:02.4"、"12.5秒"、"0.0秒"。 */
-function shotStartSeconds(value: string) {
+export function shotStartSeconds(value: string) {
     const text = String(value ?? "").trim();
     const clock = text.match(/(\d+):(\d+(?:\.\d+)?)/);
     if (clock) return Number(clock[1]) * 60 + Number(clock[2]);

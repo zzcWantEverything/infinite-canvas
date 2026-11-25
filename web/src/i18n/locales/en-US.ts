@@ -508,6 +508,13 @@ export default {
         fieldShotSize: "Shot size",
         fieldCameraAngle: "Angle",
         fieldCameraMove: "Camera move",
+        imageHistory: "Image generation history",
+        videoHistory: "Video generation history",
+        historyAvailable: "{{count}} results",
+        historyEmptyMedia: "Nothing generated for this shot yet",
+        useResult: "Use this result",
+        currentInUse: "In use",
+        download: "Download",
     },
 
     topNav: {

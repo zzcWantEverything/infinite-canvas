@@ -508,6 +508,13 @@ export default {
         fieldShotSize: "景别",
         fieldCameraAngle: "机位与角度",
         fieldCameraMove: "镜头运动",
+        imageHistory: "图片生成历史",
+        videoHistory: "视频生成历史",
+        historyAvailable: "{{count}} 个可用结果",
+        historyEmptyMedia: "这个分镜还没有生成历史",
+        useResult: "使用此结果",
+        currentInUse: "当前使用",
+        download: "下载",
     },
 
     topNav: {

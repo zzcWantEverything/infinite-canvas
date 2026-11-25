@@ -42,13 +42,13 @@ import {
     generateShotImage,
     generateShotVideo,
     groupFramesIntoWindows,
-    matchFramesToShots,
     mergeBatchAnalyses,
     mergeCasting,
     dropRepeatedDialogue,
     outlineForWindow,
     parseTranscript,
     sampleFrames,
+    shotStartSeconds,
     spreadTranscript,
     sanitizeItemIds,
     transcribeAudio,
@@ -112,6 +112,10 @@ export default function CopyVideoPage() {
     const [shotImages, setShotImages] = useState<Record<string, CopyMedia>>({});
     const [shotImageStatus, setShotImageStatus] = useState<Record<string, string>>({});
     const [shotVideos, setShotVideos] = useState<Record<string, CopyMedia>>({});
+    // 每个分镜的生成历史：最新在前，最多保留 12 条；当前展示的仍是 shotImages / shotVideos。
+    const [shotImageHistory, setShotImageHistory] = useState<Record<string, CopyMedia[]>>({});
+    const [shotVideoHistory, setShotVideoHistory] = useState<Record<string, CopyMedia[]>>({});
+    const [mediaHistory, setMediaHistory] = useState<{ kind: "image" | "video"; shotId: string } | null>(null);
     const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
     const [shotOverrides, setShotOverrides] = useState<Record<string, ShotOverride>>({});
     const [batchRunning, setBatchRunning] = useState<BatchKind>("");
@@ -272,14 +276,21 @@ export default function CopyVideoPage() {
     };
 
     /** 每个分镜自动配一张「原视频分镜图」：取起始时间最近的抽帧，落本地素材库后写 storageKey。 */
-    const attachStoryboards = async (result: CopyAnalysis, frames: CopyFrame[]) => {
-        const matched = Object.entries(matchFramesToShots(result, frames)).slice(0, 60);
-        for (const [shotId, dataUrl] of matched) {
+    const attachStoryboards = async (result: CopyAnalysis, frames: CopyFrame[], aspect: number) => {
+        // 「原视频分镜图」是一整段的多帧拼图（和参考产品一致），不是一个起始帧：
+        // 取该单元时间范围内的抽帧，最多 9 格打在带时间标注的宫格里。
+        for (const shot of result.shots.slice(0, 60)) {
+            const start = shotStartSeconds(shot.start);
+            const end = shotStartSeconds(shot.end) || start;
+            const inside = frames.filter((frame) => frame.time >= start - 0.05 && frame.time <= end + 0.05);
+            const picked = sampleFrames(inside.length ? inside : frames, 9);
+            if (!picked.length) continue;
             try {
-                const media = await uploadMediaFile(dataUrl, "image");
-                setStoryboards((prev) => ({ ...prev, [shotId]: { url: media.url, storageKey: media.storageKey } }));
+                const grid = picked.length > 1 ? await buildFrameGrid(picked, aspect) : picked[0].dataUrl;
+                const media = await uploadMediaFile(grid, "image");
+                setStoryboards((prev) => ({ ...prev, [shot.id]: { url: media.url, storageKey: media.storageKey } }));
             } catch {
-                // 单张抽帧图上传失败不影响分析结果
+                // 单张拼图上传失败不影响分析结果
             }
         }
     };
@@ -402,8 +413,10 @@ export default function CopyVideoPage() {
             setShotVideos({});
             setShotOverrides({});
             setItemImages({});
+            setShotImageHistory({});
+            setShotVideoHistory({});
             // 原视频分镜图在后台补齐，先让用户看到分析结果。
-            void attachStoryboards(finalResult, frames);
+            void attachStoryboards(finalResult, frames, meta.width / meta.height);
             message.success(t("copyVideo.analyzed"));
         } catch (e) {
             if (e instanceof DOMException && e.name === "AbortError") return;
@@ -568,7 +581,9 @@ export default function CopyVideoPage() {
         try {
             const dataUrl = await generateShotImage(imageConfig, shot, imageRefsForShot(shot), analysis?.style || "");
             const media = await uploadMediaFile(dataUrl, "image");
-            setShotImages((prev) => ({ ...prev, [shot.id]: { url: media.url, storageKey: media.storageKey } }));
+            const entry = { url: media.url, storageKey: media.storageKey };
+            setShotImages((prev) => ({ ...prev, [shot.id]: entry }));
+            setShotImageHistory((prev) => ({ ...prev, [shot.id]: [entry, ...(prev[shot.id] || [])].slice(0, 12) }));
             setShotImageStatus((prev) => ({ ...prev, [shot.id]: "done" }));
         } catch (e) {
             setShotImageStatus((prev) => ({ ...prev, [shot.id]: "failed" }));
@@ -580,7 +595,9 @@ export default function CopyVideoPage() {
         setShotStatus((prev) => ({ ...prev, [shot.id]: "running" }));
         try {
             const media = await generateShotVideo(videoConfigFor(shot), shot, videoRefsForShot(shot), analysis?.style || "");
-            setShotVideos((prev) => ({ ...prev, [shot.id]: { url: media.url, storageKey: media.storageKey } }));
+            const entry = { url: media.url, storageKey: media.storageKey };
+            setShotVideos((prev) => ({ ...prev, [shot.id]: entry }));
+            setShotVideoHistory((prev) => ({ ...prev, [shot.id]: [entry, ...(prev[shot.id] || [])].slice(0, 12) }));
             setShotStatus((prev) => ({ ...prev, [shot.id]: "done" }));
         } catch (e) {
             setShotStatus((prev) => ({ ...prev, [shot.id]: "failed" }));
@@ -624,6 +641,22 @@ export default function CopyVideoPage() {
                 : prev,
         );
         message.success(t("copyVideo.imagePromptFilled", { count: missing.length }));
+    };
+
+    const downloadShotVideo = async (shot: CopyShot) => {
+        const url = shotVideos[shot.id]?.url;
+        if (!url) return;
+        try {
+            const blob = await fetch(url).then((response) => response.blob());
+            const anchor = document.createElement("a");
+            anchor.href = URL.createObjectURL(blob);
+            const index = analysis ? analysis.shots.findIndex((item) => item.id === shot.id) : -1;
+            anchor.download = `${t("copyVideo.shot")}-${String(index + 1).padStart(2, "0")}.mp4`;
+            anchor.click();
+            URL.revokeObjectURL(anchor.href);
+        } catch (e) {
+            message.error(e instanceof Error ? e.message : t("copyVideo.downloadFailed"));
+        }
     };
 
     const downloadVideos = async () => {
@@ -695,8 +728,10 @@ export default function CopyVideoPage() {
                 analysis,
                 settings: genSettings,
                 itemImages,
-                shotVideos,
                 shotImages,
+                shotVideos,
+                shotImageHistory,
+                shotVideoHistory,
                 storyboards,
                 shotOverrides,
             });
@@ -736,6 +771,8 @@ export default function CopyVideoPage() {
                 itemImages?: Record<string, CopyMedia>;
                 shotVideos?: Record<string, CopyMedia>;
                 shotImages?: Record<string, CopyMedia>;
+                shotImageHistory?: Record<string, CopyMedia[]>;
+                shotVideoHistory?: Record<string, CopyMedia[]>;
                 storyboards?: Record<string, CopyMedia>;
                 shotOverrides?: Record<string, ShotOverride>;
                 source?: { sceneCount?: number; frameCount?: number } | null;
@@ -759,9 +796,31 @@ export default function CopyVideoPage() {
                 for (const [oldId, media] of Object.entries(resolved)) moved[sanitized.remap[oldId] ?? oldId] = media;
                 return moved;
             };
+            const resolveHistory = async (map?: Record<string, CopyMedia[]>) => {
+                const out: Record<string, CopyMedia[]> = {};
+                for (const [oldId, list] of Object.entries(map || {})) {
+                    const resolved: CopyMedia[] = [];
+                    for (const media of list) {
+                        if (!media?.storageKey) continue;
+                        const url = await resolveMediaUrl(media.storageKey, "").catch(() => "");
+                        if (url) resolved.push({ url, storageKey: media.storageKey });
+                    }
+                    if (resolved.length) out[sanitized.remap[oldId] ?? oldId] = resolved;
+                }
+                return out;
+            };
             setItemImages(await remapMedia(doc.itemImages));
-            setShotVideos(await remapMedia(doc.shotVideos));
-            setShotImages(await remapMedia(doc.shotImages));
+            const videos = await remapMedia(doc.shotVideos);
+            const images = await remapMedia(doc.shotImages);
+            const videoHistory = await resolveHistory(doc.shotVideoHistory);
+            const imageHistory = await resolveHistory(doc.shotImageHistory);
+            // 老记录只有当前那一张：补成一条历史，历史面板里也能看到。
+            for (const [shotId, media] of Object.entries(images)) if (!imageHistory[shotId]) imageHistory[shotId] = [media];
+            for (const [shotId, media] of Object.entries(videos)) if (!videoHistory[shotId]) videoHistory[shotId] = [media];
+            setShotVideos(videos);
+            setShotImages(images);
+            setShotVideoHistory(videoHistory);
+            setShotImageHistory(imageHistory);
             setStoryboards(await remapMedia(doc.storyboards));
             setShotOverrides(doc.shotOverrides ?? {});
             setItemStatus({});
@@ -1192,6 +1251,8 @@ export default function CopyVideoPage() {
                                 storyboards={storyboards}
                                 shotImages={shotImages}
                                 shotVideos={shotVideos}
+                                shotImageHistory={shotImageHistory}
+                                shotVideoHistory={shotVideoHistory}
                                 imageStatus={shotImageStatus}
                                 videoStatus={shotStatus}
                                 overrides={shotOverrides}
@@ -1210,6 +1271,9 @@ export default function CopyVideoPage() {
                                 })}
                                 onGenerateImage={(shot) => void runShotImage(shot)}
                                 onGenerateVideo={(shot) => void runShotVideo(shot)}
+                                onOpenImageHistory={(id) => setMediaHistory({ kind: "image", shotId: id })}
+                                onOpenVideoHistory={(id) => setMediaHistory({ kind: "video", shotId: id })}
+                                onDownloadVideo={(shot) => void downloadShotVideo(shot)}
                             />
                         </section>
 
@@ -1328,6 +1392,61 @@ export default function CopyVideoPage() {
                         ))}
                     </div>
                 ) : null}
+            </Modal>
+
+            {/* 分镜图片 / 视频的生成历史 */}
+            <Modal
+                open={Boolean(mediaHistory)}
+                title={mediaHistory?.kind === "video" ? t("copyVideo.videoHistory") : t("copyVideo.imageHistory")}
+                footer={null}
+                width={720}
+                onCancel={() => setMediaHistory(null)}
+                destroyOnHidden
+            >
+                {mediaHistory ? (() => {
+                    const list = (mediaHistory.kind === "image" ? shotImageHistory : shotVideoHistory)[mediaHistory.shotId] || [];
+                    const current = (mediaHistory.kind === "image" ? shotImages : shotVideos)[mediaHistory.shotId];
+                    const shotIndex = analysis?.shots.findIndex((shot) => shot.id === mediaHistory.shotId) ?? -1;
+                    if (!list.length) return <div className="py-8 text-center text-xs text-stone-400">{t("copyVideo.historyEmptyMedia")}</div>;
+                    return (
+                        <div className="pt-2">
+                            <div className="mb-3 text-xs text-stone-400 dark:text-stone-500">
+                                {t("copyVideo.shot")} {String(shotIndex + 1).padStart(2, "0")} · {t("copyVideo.historyAvailable", { count: list.length })}
+                            </div>
+                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                {list.map((media) => {
+                                    const active = Boolean(current?.storageKey) && current.storageKey === media.storageKey;
+                                    return (
+                                        <div key={media.storageKey} className={["overflow-hidden rounded-xl border", active ? "border-stone-400 dark:border-stone-500" : "border-stone-200 dark:border-stone-800"].join(" ")}>
+                                            <div className="aspect-video bg-black">
+                                                {mediaHistory.kind === "video" ? (
+                                                    <video src={media.url} controls playsInline className="h-full w-full object-contain" />
+                                                ) : (
+                                                    <img src={media.url} alt="" className="h-full w-full object-contain" />
+                                                )}
+                                            </div>
+                                            <div className="p-2">
+                                                <Button
+                                                    size="small"
+                                                    block
+                                                    disabled={active}
+                                                    icon={active ? <Check className="size-3.5" /> : undefined}
+                                                    onClick={() => {
+                                                        const apply = (prev: Record<string, CopyMedia>) => ({ ...prev, [mediaHistory.shotId]: media });
+                                                        if (mediaHistory.kind === "image") setShotImages(apply);
+                                                        else setShotVideos(apply);
+                                                    }}
+                                                >
+                                                    {active ? t("copyVideo.currentInUse") : t("copyVideo.useResult")}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                })() : null}
             </Modal>
         </main>
     );

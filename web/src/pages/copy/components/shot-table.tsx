@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import { Button, Input, Select } from "antd";
-import { ChevronDown, ChevronUp, Copy, ImageIcon, ImagePlus, Info, Loader2, Sparkles, Trash2, Video } from "lucide-react";import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronUp, Copy, Download, History, ImageIcon, ImagePlus, Info, Loader2, Sparkles, Trash2, Video } from "lucide-react";import { useTranslation } from "react-i18next";
 
 import type { CopyShot } from "@/services/api/copy-video";
 import type { CopyMedia } from "@/components/copy/types";
@@ -15,6 +15,8 @@ type ShotTableProps = {
     storyboards: Record<string, CopyMedia>;
     shotImages: Record<string, CopyMedia>;
     shotVideos: Record<string, CopyMedia>;
+    shotImageHistory: Record<string, CopyMedia[]>;
+    shotVideoHistory: Record<string, CopyMedia[]>;
     imageStatus: Record<string, string>;
     videoStatus: Record<string, string>;
     overrides: Record<string, ShotOverride>;
@@ -29,6 +31,9 @@ type ShotTableProps = {
     onRemoveStoryboard: (id: string) => void;
     onGenerateImage: (shot: CopyShot) => void;
     onGenerateVideo: (shot: CopyShot) => void;
+    onOpenImageHistory: (id: string) => void;
+    onOpenVideoHistory: (id: string) => void;
+    onDownloadVideo: (shot: CopyShot) => void;
 };
 
 const cellClass = "border-b border-stone-200/70 px-1.5 py-3 align-middle dark:border-stone-800";
@@ -42,7 +47,7 @@ const ratioAspect = (ratio: string) => {
  * 信息条放分镜号/时间/单镜分辨率时长；内容行是视频描述词、原视频分镜图、图片描述词、图片预览、视频预览。
  */
 export function ShotTable(props: ShotTableProps) {
-    const { shots, imageRatio, disabled, storyboards, shotImages, shotVideos, imageStatus, videoStatus, overrides, resolutionOptions, secondsOptions } = props;
+    const { shots, imageRatio, disabled, storyboards, shotImages, shotVideos, shotImageHistory, shotVideoHistory, imageStatus, videoStatus, overrides, resolutionOptions, secondsOptions } = props;
     const { t } = useTranslation();
     const copyText = useCopyText();
     const aspect = { aspectRatio: String(ratioAspect(imageRatio)) };
@@ -193,9 +198,14 @@ export function ShotTable(props: ShotTableProps) {
                                                 <div className="overflow-hidden rounded-lg border border-stone-200 bg-black dark:border-stone-700" style={aspect}>
                                                     <img src={image.url} alt={`shot-${index + 1}`} className="h-full w-full object-contain" />
                                                 </div>
-                                                <Button size="small" block icon={<Sparkles className="size-3.5" />} loading={imageRunning} disabled={disabled} onClick={() => props.onGenerateImage(shot)}>
-                                                    {t("copyVideo.regenerate")}
-                                                </Button>
+                                                <div className="flex gap-1.5">
+                                                    <Button size="small" className="flex-1" icon={<Sparkles className="size-3.5" />} loading={imageRunning} disabled={disabled} onClick={() => props.onGenerateImage(shot)}>
+                                                        {t("copyVideo.regenerate")}
+                                                    </Button>
+                                                    <Button size="small" icon={<History className="size-3.5" />} onClick={() => props.onOpenImageHistory(shot.id)}>
+                                                        {(shotImageHistory[shot.id] || []).length || ""}
+                                                    </Button>
+                                                </div>
                                             </div>
                                         ) : (
                                             <button
@@ -214,9 +224,15 @@ export function ShotTable(props: ShotTableProps) {
                                         {video?.url ? (
                                             <div className="space-y-1.5">
                                                 <video src={video.url} controls playsInline className="w-full rounded-lg bg-black" style={aspect} />
-                                                <Button size="small" block icon={<Sparkles className="size-3.5" />} loading={videoRunning} disabled={disabled} onClick={() => props.onGenerateVideo(shot)}>
-                                                    {t("copyVideo.regenerate")}
-                                                </Button>
+                                                <div className="flex gap-1.5">
+                                                    <Button size="small" className="flex-1" icon={<Sparkles className="size-3.5" />} loading={videoRunning} disabled={disabled} onClick={() => props.onGenerateVideo(shot)}>
+                                                        {t("copyVideo.regenerate")}
+                                                    </Button>
+                                                    <Button size="small" icon={<History className="size-3.5" />} onClick={() => props.onOpenVideoHistory(shot.id)}>
+                                                        {(shotVideoHistory[shot.id] || []).length || ""}
+                                                    </Button>
+                                                    <Button size="small" icon={<Download className="size-3.5" />} onClick={() => props.onDownloadVideo(shot)} title={t("copyVideo.download")} />
+                                                </div>
                                             </div>
                                         ) : (
                                             <button
