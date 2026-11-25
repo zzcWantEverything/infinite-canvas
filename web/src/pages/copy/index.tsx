@@ -119,7 +119,16 @@ export default function CopyVideoPage() {
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyList, setHistoryList] = useState<CopyHistorySummary[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
-    const [sourceMeta, setSourceMeta] = useState<{ sceneCount?: number; frameCount?: number; duration?: number } | null>(null);
+    const [sourceMeta, setSourceMeta] = useState<{
+        sceneCount?: number;
+        frameCount?: number;
+        duration?: number;
+        /** 转写诊断：字符数 / 解析出的时间戳段数 / 开头片段 / 失败原因 */
+        transcriptChars?: number;
+        transcriptSegments?: number;
+        transcriptHead?: string;
+        transcriptError?: string;
+    } | null>(null);
     // 云端保存要等素材上传落地，串行化避免同一份记录并发写。
     const savingRef = useRef(false);
     const [saving, setSaving] = useState(false);
@@ -301,11 +310,13 @@ export default function CopyVideoPage() {
             // 2) 音轨转写：失败降级为无台词，不阻塞分析。带时间戳的转写会按时间窗对齐到节拍。
             setAnalysisStage("transcribe");
             let rawTranscript = "";
+            let transcriptError = "";
             try {
                 const audio = await extractAudioWav(file);
-                if (audio) rawTranscript = await transcribeAudio(config.baseUrl, sessionToken, audio.blob);
-            } catch {
-                rawTranscript = "";
+                if (!audio) transcriptError = "音轨解码失败（编码不被浏览器支持）";
+                else rawTranscript = await transcribeAudio(config.baseUrl, sessionToken, audio.blob);
+            } catch (e) {
+                transcriptError = e instanceof Error ? e.message : "转写失败";
             }
             const segments = parseTranscript(rawTranscript);
             setAnalysisPercent(15);
@@ -366,7 +377,16 @@ export default function CopyVideoPage() {
                 items: casting.items,
             };
             setAnalysis(finalResult);
-            setSourceMeta({ sceneCount: meta.sceneCount, frameCount: frames.length });
+            // 转写诊断留在记录里：下次「台词待核对」时能直接看出是没声音、解码失败还是格式没解析出来。
+            setSourceMeta({
+                sceneCount: meta.sceneCount,
+                frameCount: frames.length,
+                duration: Number(meta.duration.toFixed(1)),
+                transcriptChars: rawTranscript.length,
+                transcriptSegments: segments.length,
+                transcriptHead: rawTranscript.slice(0, 300),
+                transcriptError,
+            });
             // 新的一次分析 → 新的一条历史，之前的记录保持原样。
             syncHistoryId(null);
             setStoryboards({});

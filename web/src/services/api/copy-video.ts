@@ -668,7 +668,19 @@ export function parseTranscript(raw: string): TranscriptSegment[] {
         if (!line || !Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
         segments.push({ start, end, text: line });
     }
-    return segments.sort((a, b) => a.start - b.start);
+    if (segments.length) return segments.sort((a, b) => a.start - b.start);
+    // 兜底：只有单个时间点（[0:00:12,300] 台词）的格式，用下一行的时间点当结束，
+    // 最后一行没有下一行时按 3 秒补齐。
+    const points: { time: number; text: string }[] = [];
+    const pointPattern = /\[\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*\]\s*([^\[\n]+)/g;
+    for (const match of text.matchAll(pointPattern)) {
+        const time = timecodeToSeconds(match[1]);
+        const line = match[2].trim();
+        if (line && Number.isFinite(time)) points.push({ time, text: line });
+    }
+    return points
+        .sort((a, b) => a.time - b.time)
+        .map((point, index) => ({ start: point.time, end: index + 1 < points.length ? points[index + 1].time : point.time + 3, text: point.text }));
 }
 
 /** 整片台词（给第一步做全局理解用）。没有时间戳时原样返回。 */
