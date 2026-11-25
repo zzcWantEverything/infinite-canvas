@@ -165,6 +165,8 @@ export type CopyWindowContext = {
     transcript: string;
     /** 第一步大纲里落在这个窗的剧情摘要，给模型当上下文 */
     outline?: string;
+    /** 本窗前已经说过的台词，用来避免同一句被写两遍 */
+    previousDialogue?: string;
     /** 上一窗最后一个单元的收尾状态，用来做连续性 */
     previousEndState?: string;
 };
@@ -252,6 +254,8 @@ function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
         "",
         ctx.previousEndState ? `【上一单元结束状态】${ctx.previousEndState}\n本窗第一个节拍必须自然承接它（站位、姿态、道具、声音都不许无原因重置）。` : "",
         ctx.transcript ? `【本窗台词（带时间戳，必须逐字使用）】\n${ctx.transcript}\n台词按时间对齐到节拍；不得改写、增删、重复。时间戳与画面对不上时以画面为准并微调节拍，但台词文字保持原样。` : "【本窗没有可靠台词】按画面唇形/字幕判断，拿不准写「台词待核对」。",
+        ctx.previousDialogue ? `【前面单元已经说过的台词（本窗不要重复）】${ctx.previousDialogue}
+同一句台词全片只写一次；上一窗开始、本窗仍在延续的声音写「承接上一窗」，不要重抄整段。` : "",
         ctx.outline ? `【本窗剧情大纲】
 ${ctx.outline}` : "",
         "",
@@ -691,8 +695,11 @@ export function formatTranscript(raw: string, segments: TranscriptSegment[]) {
 
 /** 只取落在时间窗内的台词，前后各放 1 秒容差，避免跨边界的半句被切掉。 */
 export function transcriptForWindow(segments: TranscriptSegment[], start: number, end: number) {
+    // 按**句首时间**归属：一句台词只落在开始时间所在的那个窗口里。
+    // 之前用「区间有重叠就带上」，跨窗的句子会在相邻两个窗口各出现一次，
+    // 结果两个分镜把同一段台词原样写了两遍。
     return segments
-        .filter((segment) => segment.end >= start - 1 && segment.start <= end + 1)
+        .filter((segment) => segment.start >= start - 0.3 && segment.start < end)
         .map((segment) => `${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`)
         .join("\n");
 }
@@ -1096,6 +1103,19 @@ export function mergeBatchAnalyses(results: CopyAnalysis[]): CopyAnalysis {
         items: mergeList("items"),
         shots: shots.map((shot, index) => ({ ...shot, id: `shot-${stamp}-${index}` })),
     };
+}
+
+/** 合并后再兜一层：后一个分镜的台词整段包含/被包含于前面某段时清空，避免同一段被写两遍。 */
+export function dropRepeatedDialogue(analysis: CopyAnalysis): CopyAnalysis {
+    const seen: string[] = [];
+    const shots = analysis.shots.map((shot) => {
+        const text = String(shot.dialogue || "").trim();
+        if (!text) return shot;
+        const repeated = seen.some((prev) => prev.length > 15 && (prev.includes(text) || text.includes(prev)));
+        seen.push(text);
+        return repeated ? { ...shot, dialogue: "" } : shot;
+    });
+    return { ...analysis, shots };
 }
 
 /** 时间码归一成秒：支持 "1:02.4"、"12.5秒"、"0.0秒"。 */

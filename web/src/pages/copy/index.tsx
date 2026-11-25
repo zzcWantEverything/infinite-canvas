@@ -45,6 +45,7 @@ import {
     matchFramesToShots,
     mergeBatchAnalyses,
     mergeCasting,
+    dropRepeatedDialogue,
     outlineForWindow,
     parseTranscript,
     sampleFrames,
@@ -332,6 +333,8 @@ export default function CopyVideoPage() {
             let result: CopyAnalysis | null = null;
             let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
             let previousEndState = "";
+            // 已说过的台词：传给下一窗，避免同一句被写两遍；合并后再兜一层去重。
+            const usedDialogue: string[] = [];
             for (let index = 0; index < windows.length; index += 1) {
                 setAnalysisStage("window");
                 setWindowProgress({ current: index + 1, total: windows.length });
@@ -352,6 +355,7 @@ export default function CopyVideoPage() {
                         // 有带时间戳的转写就只给本窗台词；解析不到时间戳时退回整段（截断），至少别让台词全丢。
                         transcript: transcriptForWindow(segments, startTime, endTime) || untimedTranscript,
                         outline: outlineForWindow(overview.outline, startTime, endTime),
+                        previousDialogue: usedDialogue.slice(-3).join("；").slice(0, 600),
                         previousEndState,
                     });
                 } catch (windowError) {
@@ -362,12 +366,13 @@ export default function CopyVideoPage() {
                 }
                 casting = mergeCasting(overview, partial);
                 result = result ? mergeBatchAnalyses([result, partial]) : partial;
+                for (const shot of partial.shots) if (shot.dialogue?.trim()) usedDialogue.push(shot.dialogue.trim());
                 const last = partial.shots[partial.shots.length - 1];
                 if (last) previousEndState = last.videoPrompt.split("\n").slice(-1)[0] || last.description;
                 setAnalysisPercent(25 + Math.round(((index + 1) / windows.length) * 68));
             }
             if (!result) throw new Error(t("copyVideo.analyzeFailed"));
-            const finalResult: CopyAnalysis = {
+            const finalResult: CopyAnalysis = dropRepeatedDialogue({
                 ...result,
                 title: result.title && result.title !== "爆款转绘" ? result.title : overview.title,
                 ratio: result.ratio || overview.ratio,
@@ -375,7 +380,7 @@ export default function CopyVideoPage() {
                 roles: casting.roles,
                 scenes: casting.scenes,
                 items: casting.items,
-            };
+            });
             setAnalysis(finalResult);
             // 转写诊断留在记录里：下次「台词待核对」时能直接看出是没声音、解码失败还是格式没解析出来。
             setSourceMeta({
