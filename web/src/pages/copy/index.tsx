@@ -45,6 +45,7 @@ import {
     matchFramesToShots,
     mergeBatchAnalyses,
     mergeCasting,
+    outlineForWindow,
     parseTranscript,
     sampleFrames,
     sanitizeItemIds,
@@ -315,7 +316,8 @@ export default function CopyVideoPage() {
             const overview = await analyzeOverview(overviewGrid, meta, ANALYSIS_MODEL, sessionToken, formatTranscript(rawTranscript, segments));
             setAnalysisPercent(25);
             // 4) 第二步：按时间窗逐段细化，串行——后面的窗要吃前面窗定下的资产和收尾状态。
-            const windows = groupFramesIntoWindows(frames, 16);
+            const windows = groupFramesIntoWindows(frames, 12);
+            const untimedTranscript = segments.length ? "" : String(rawTranscript || "").trim().slice(0, 1200);
             let result: CopyAnalysis | null = null;
             let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
             let previousEndState = "";
@@ -336,7 +338,9 @@ export default function CopyVideoPage() {
                         endTime,
                         cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
                         casting,
-                        transcript: transcriptForWindow(segments, startTime, endTime),
+                        // 有带时间戳的转写就只给本窗台词；解析不到时间戳时退回整段（截断），至少别让台词全丢。
+                        transcript: transcriptForWindow(segments, startTime, endTime) || untimedTranscript,
+                        outline: outlineForWindow(overview.outline, startTime, endTime),
                         previousEndState,
                     });
                 } catch (windowError) {

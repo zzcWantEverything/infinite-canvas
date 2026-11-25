@@ -163,6 +163,8 @@ export type CopyWindowContext = {
     casting: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
     /** 本窗内的台词（带时间戳，原样使用） */
     transcript: string;
+    /** 第一步大纲里落在这个窗的剧情摘要，给模型当上下文 */
+    outline?: string;
     /** 上一窗最后一个单元的收尾状态，用来做连续性 */
     previousEndState?: string;
 };
@@ -250,11 +252,15 @@ function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
         "",
         ctx.previousEndState ? `【上一单元结束状态】${ctx.previousEndState}\n本窗第一个节拍必须自然承接它（站位、姿态、道具、声音都不许无原因重置）。` : "",
         ctx.transcript ? `【本窗台词（带时间戳，必须逐字使用）】\n${ctx.transcript}\n台词按时间对齐到节拍；不得改写、增删、重复。时间戳与画面对不上时以画面为准并微调节拍，但台词文字保持原样。` : "【本窗没有可靠台词】按画面唇形/字幕判断，拿不准写「台词待核对」。",
+        ctx.outline ? `【本窗剧情大纲】
+${ctx.outline}` : "",
         "",
         directingRules,
         "",
         "【输出要求】",
-        "- shots 里只写完全落在本窗范围内的单元，按时间排序；单元 5~15 秒，不少于 1 个、不要超出本窗范围太多。",
+        `- shots 只写完全落在本窗 ${ctx.startTime.toFixed(1)}~${ctx.endTime.toFixed(1)} 秒范围内的单元，按时间排序，首尾相接覆盖本窗。`,
+        `- 单元时长 5~15 秒且不得超过本窗长度（${(ctx.endTime - ctx.startTime).toFixed(1)} 秒）；本窗不足 5 秒时只写一个覆盖整窗的单元。`,
+        `- start / end / duration 一律用全片绝对时间（本窗起点是 ${ctx.startTime.toFixed(1)} 秒），不要每个窗都从 0.0 秒重新计时。`,
         "- 每个单元的 videoPrompt 第一行是【起-止秒】，之后每行一个节拍：「起-止秒：在 @场景 中，<景别><机位><角度><运动>拍摄。@角色 <位置朝向、动作、眼神、表情>，说道：\"台词\"。」",
         "- 没有台词的节拍写环境声、动作音效或画外音，并标注声音类型。",
         "- 最后一个节拍写清收尾状态（可用「容错时间内保持…」），方便下一单元衔接。",
@@ -265,9 +271,9 @@ function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
         `{
   "shots": [{
     "start": "${ctx.startTime.toFixed(1)}秒",
-    "end": "10.0秒",
-    "duration": "10.0秒",
-    "videoPrompt": "【0秒-10秒】\\n0-4秒：在 @场景名 中，…\\n5-7秒：…\\n8-10秒：…",
+    "end": "${Math.min(ctx.startTime + 8, ctx.endTime).toFixed(1)}秒",
+    "duration": "${Math.min(8, ctx.endTime - ctx.startTime).toFixed(1)}秒",
+    "videoPrompt": "【${ctx.startTime.toFixed(1)}-${Math.min(ctx.startTime + 8, ctx.endTime).toFixed(1)}秒】\n节拍1起-止秒：在 @场景名 中，…\n节拍2起-止秒：…",
     "shotSize": "特写/近景/中景/全景/远景",
     "cameraAngle": "平视/俯拍/仰拍/正面/侧面/过肩等，含机位高低",
     "cameraMove": "固定/推/拉/摇/移/跟/手持，含起止位置",
@@ -550,7 +556,7 @@ export async function analyzeShotsWindow(
     signal?: AbortSignal,
 ): Promise<CopyAnalysis> {
     const content = await runAnalyzeJob(sessionToken, model, windowPrompt(meta, ctx), gridDataUrl, signal);
-    return normalizeAnalysis(extractJson(content));
+    return clampWindowShots(normalizeAnalysis(extractJson(content)), ctx.startTime, ctx.endTime);
 }
 
 
@@ -863,7 +869,7 @@ function closeUnclosedJson(value: string): string {
             nested = closers.length > 0;
         }
         if (!nested) continue;
-        const candidate = head + closers.reverse().join("");
+        const candidate = head + closers.reverse().join("\n");
         if (parseJsonLoose(candidate)) return candidate;
     }
     return "";
@@ -925,6 +931,32 @@ export function mergeCasting(overview: CopyOverview, extra: { roles: CopyItem[];
     };
 }
 
+/**
+ * 窗口产出的时间要归一：模型可能写成窗内相对时间（从 0 开始），也可能越过窗口边界。
+ * 这里统一映射成全片绝对时间并夹在本窗内，单元时长封顶 15 秒；完全落在窗外的丢弃。
+ * 不做这一步，几个窗口会各自从 0 秒开始，合并时按起始时间去重，后面的单元就全没了。
+ */
+export function clampWindowShots(analysis: CopyAnalysis, start: number, end: number): CopyAnalysis {
+    const shots = analysis.shots
+        .map((shot) => {
+            let s = shotStartSeconds(shot.start);
+            let e = shotStartSeconds(shot.end);
+            if (!Number.isFinite(s)) s = start;
+            if (!Number.isFinite(e) || e <= s) e = s + Math.min(8, Math.max(1, end - s));
+            // 窗内相对时间 → 绝对时间（只对非首个窗口做，避免把 0.x 秒的合法起点改坏）
+            if (start > 0.05 && s < start - 0.5) {
+                s += start;
+                e += start;
+            }
+            s = Math.max(start, Math.min(s, Math.max(start, end - 0.1)));
+            e = Math.min(end, Math.max(s + 0.1, e));
+            if (e - s > 15) e = s + 15;
+            return { ...shot, start: `${s.toFixed(1)}秒`, end: `${e.toFixed(1)}秒`, duration: `${(e - s).toFixed(1)}秒` };
+        })
+        .filter((shot) => Number(shot.end.replace(/[^0-9.]/g, "")) > Number(shot.start.replace(/[^0-9.]/g, "")));
+    return { ...analysis, shots };
+}
+
 function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
     const stamp = Date.now();
     // id 必须按分区加前缀：roles/scenes/items 各自从 0 开始编号，
@@ -973,11 +1005,30 @@ function normalizeAnalysis(raw: Record<string, unknown>): CopyAnalysis {
  * 按时间窗切帧：从第一步的单元大纲出发，每窗 frames 帧连续覆盖一段时间。
  * 和按场景切不同，这里保证一窗只覆盖一段连续时间，分镜单元不会跨窗。
  */
-export function groupFramesIntoWindows(frames: CopyFrame[], perWindow = 16): CopyFrame[][] {
+export function groupFramesIntoWindows(frames: CopyFrame[], secondsPerWindow = 12, maxCells = 16): CopyFrame[][] {
     const sorted = [...frames].sort((a, b) => a.time - b.time);
+    if (!sorted.length) return [];
+    // 按**时长**切窗，不按帧数：短视频是 0.2 秒一帧，按帧数切会把 10 秒的片子拆成 4 个 3 秒的小窗，
+    // 模型就没法在里面排出 5~15 秒的单元。窗内帧太多时再抽稀，保证单张宫格看得清。
     const windows: CopyFrame[][] = [];
-    for (let index = 0; index < sorted.length; index += perWindow) windows.push(sorted.slice(index, index + perWindow));
-    return windows;
+    let current: CopyFrame[] = [];
+    for (const frame of sorted) {
+        if (current.length && frame.time - current[0].time >= secondsPerWindow) {
+            windows.push(current);
+            current = [];
+        }
+        current.push(frame);
+    }
+    if (current.length) windows.push(current);
+    return windows.map((windowFrames) => sampleFrames(windowFrames, maxCells));
+}
+
+/** 取大纲里和本窗重叠的条目，作为窗口提示词的剧情上下文。 */
+export function outlineForWindow(outline: CopyOutlineUnit[], start: number, end: number) {
+    return outline
+        .filter((unit) => shotStartSeconds(unit.end) >= start - 0.5 && shotStartSeconds(unit.start) <= end + 0.5)
+        .map((unit) => `${unit.start}-${unit.end}：${unit.summary}`)
+        .join("\n");
 }
 
 /** 均匀抽稀到 max 帧（保留首尾），给第一步的「全局视图」用。 */
