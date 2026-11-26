@@ -22,6 +22,8 @@ export default {
         all: "全部",
         view: "查看",
         download: "下载",
+        etaLong: "预计 5-10 分钟完成",
+        pickFromLibrary: "从素材库选择",
         upload: "上传",
         requestCanceled: "请求已取消",
         durationMinutes: "{{minutes}}分{{seconds}}秒",

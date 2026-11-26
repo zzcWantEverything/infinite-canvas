@@ -6,6 +6,15 @@
  * 下拉、卡片画幅、生图提示词都会自动跟上；提示词里用到的变量见 CharacterPromptInput。
  */
 
+/** 所有生成图通用的收尾约束：模型很容易自己往画面里加标题、水印、标签。 */
+export const NO_TEXT_RULE = "画面中不要出现任何文字：不要标题、字幕、标签、说明文字、水印、Logo、品牌名和乱码。";
+
+/** 场景图：只要环境，不要人。 */
+export const SCENE_RULE = "只表现场景本身：画面中不要出现任何人物、人体、面部、手部或动物，也不要有任何文字；构图保持空旷，方便后期把角色放进去。";
+
+/** 物品图：只要这一件物品。 */
+export const ITEM_RULE = "只展示当前这一件物品本体：主体完整、清晰、无遮挡，画面中不要出现人物、手部、动物、其他物品和复杂场景，背景简洁，也不要文字。";
+
 export type CharacterPromptInput = {
     /** 角色名 */
     name: string;
@@ -98,7 +107,8 @@ export function characterStyleOf(id: string | undefined): CharacterStyle {
     return CHARACTER_STYLES.find((style) => style.id === id) ?? CHARACTER_STYLES[0];
 }
 
-/** 角色生图提示词：选中的样式模板 + 角色信息 + 全片风格。 */
+/** 角色生图提示词：选中的样式模板 + 角色信息 + 全片风格 + 通用禁文字约束。 */
 export function characterImagePrompt(input: CharacterPromptInput & { styleId?: string }): string {
-    return characterStyleOf(input.styleId).prompt(input);
+    return `${characterStyleOf(input.styleId).prompt(input)}
+${NO_TEXT_RULE}`;
 }

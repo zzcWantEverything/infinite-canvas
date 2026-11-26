@@ -7,7 +7,7 @@ import { CHARACTER_STYLES, characterStyleOf, DEFAULT_CHARACTER_STYLE } from "@/c
 import { videoModelCapability } from "@/config/video-models";
 import { mediaRatioOptions, mediaScaleOptions } from "@/lib/media-size";
 import { cn } from "@/lib/utils";
-import type { AiConfig } from "@/stores/use-config-store";
+import { selectableModelsByCapability, type AiConfig } from "@/stores/use-config-store";
 
 /** 生成阶段的统一参数：所有角色/场景/物品共用一套生图参数，所有分镜共用一套生视频参数。 */
 export type CopyGenSettings = {
@@ -22,9 +22,18 @@ export type CopyGenSettings = {
     videoSeconds: string;
 };
 
+/**
+ * 默认生图模型优先用 image-2（tt-image-2）：它在这些图片线路里最稳、按 size 精确出图。
+ * 没配置到就退回全局默认，不猜别的模型。
+ */
+export function preferredImageModel(config: AiConfig) {
+    const candidates = selectableModelsByCapability(config, "image");
+    return candidates.find((model) => /(^|::)tt-image-2$/.test(model)) || config.imageModel || "";
+}
+
 export function createCopyGenSettings(config: AiConfig): CopyGenSettings {
     return {
-        imageModel: config.imageModel || "",
+        imageModel: preferredImageModel(config),
         // 统一默认 16:9（业务口径）；需要竖屏时在面板里改。
         imageRatio: "16:9",
         imageScale: "1k",

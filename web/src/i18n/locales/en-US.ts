@@ -22,6 +22,8 @@ export default {
         all: "All",
         view: "View",
         download: "Download",
+        etaLong: "About 5–10 minutes",
+        pickFromLibrary: "Pick from library",
         upload: "Upload",
         requestCanceled: "Request canceled",
         durationMinutes: "{{minutes}}m {{seconds}}s",

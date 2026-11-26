@@ -1,4 +1,4 @@
-import { ImagePlus, Loader2, Map, Package, Pencil, Sparkles, TriangleAlert, Trash2, User } from "lucide-react";
+import { ImagePlus, Library, Loader2, Map, Package, Pencil, Sparkles, TriangleAlert, Trash2, User } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { CopyItem } from "@/services/api/copy-video";
@@ -17,6 +17,10 @@ type AssetCardProps = {
     onGenerate: () => void;
     onUpload: () => void;
     onRemove: () => void;
+    /** 点图看大图 */
+    onPreview?: () => void;
+    /** 从「我的素材」里挑一张 */
+    onPickLibrary?: () => void;
 };
 
 const kindIcon = { role: User, scene: Map, item: Package } as const;
@@ -27,7 +31,7 @@ const toCssRatio = (ratio: string | undefined, fallback: string) => {
 };
 
 /** 角色/场景/物品卡片：上图下名，底部生图 + 上传替换 + 编辑，和参考产品的信息密度一致。 */
-export function AssetCard({ item, kind, aspectRatio, media, running, failed, disabled, onEdit, onGenerate, onUpload, onRemove }: AssetCardProps) {
+export function AssetCard({ item, kind, aspectRatio, media, running, failed, disabled, onEdit, onGenerate, onUpload, onRemove, onPreview, onPickLibrary }: AssetCardProps) {
     const { t } = useTranslation();
     const Icon = kindIcon[kind];
     return (
@@ -46,7 +50,12 @@ export function AssetCard({ item, kind, aspectRatio, media, running, failed, dis
                 style={{ aspectRatio: toCssRatio(aspectRatio, kind === "role" ? "3 / 4" : "16 / 9") }}
             >
                 {media?.url ? (
-                    <img src={media.url} alt={item.name} className="h-full w-full object-cover object-top" />
+                    <img
+                        src={media.url}
+                        alt={item.name}
+                        onClick={onPreview}
+                        className={`h-full w-full object-cover object-top ${onPreview ? "cursor-zoom-in" : ""}`}
+                    />
                 ) : failed ? (
                     <div className="flex flex-col items-center gap-1 px-2 text-center">
                         <TriangleAlert className="size-5 text-rose-400" />
@@ -84,6 +93,17 @@ export function AssetCard({ item, kind, aspectRatio, media, running, failed, dis
                 >
                     <ImagePlus className="size-3.5" />
                 </button>
+                {onPickLibrary ? (
+                    <button
+                        type="button"
+                        onClick={onPickLibrary}
+                        disabled={disabled || running}
+                        className="flex size-6 items-center justify-center rounded-md bg-stone-100 text-stone-500 transition-colors hover:bg-stone-200 disabled:opacity-50 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700"
+                        title={t("copyVideo.pickFromLibrary")}
+                    >
+                        <Library className="size-3.5" />
+                    </button>
+                ) : null}
                 <button
                     type="button"
                     onClick={onEdit}

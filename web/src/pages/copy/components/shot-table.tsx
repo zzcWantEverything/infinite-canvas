@@ -34,6 +34,8 @@ type ShotTableProps = {
     onOpenImageHistory: (id: string) => void;
     onOpenVideoHistory: (id: string) => void;
     onDownloadVideo: (shot: CopyShot) => void;
+    /** 点图看大图 */
+    onPreviewImage: (url: string) => void;
 };
 
 const cellClass = "border-b border-stone-200/70 px-1.5 py-3 align-middle dark:border-stone-800";
@@ -194,8 +196,13 @@ export function ShotTable(props: ShotTableProps) {
                                     </td>
                                     <td className={cellClass}>
                                         {image?.url ? (
-                                            <div className="space-y-1.5">
-                                                <div className="overflow-hidden rounded-lg border border-stone-200 bg-black dark:border-stone-700" style={aspect}>
+                                            <div className="relative space-y-1.5">
+                                                {imageRunning ? (
+                                                    <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/45">
+                                                        <Loader2 className="size-5 animate-spin" style={{ color: "#fff" }} />
+                                                    </span>
+                                                ) : null}
+                                                <div className="cursor-zoom-in overflow-hidden rounded-lg border border-stone-200 bg-black dark:border-stone-700" style={aspect} onClick={() => props.onPreviewImage(image.url)}>
                                                     <img src={image.url} alt={`shot-${index + 1}`} className="h-full w-full object-contain" />
                                                 </div>
                                                 <div className="flex gap-1.5">
@@ -243,7 +250,7 @@ export function ShotTable(props: ShotTableProps) {
                                                 style={aspect}
                                             >
                                                 {videoRunning ? <Loader2 className="size-4 animate-spin" /> : <Video className="size-4" />}
-                                                <span className="text-[11px]">{videoRunning ? t("copyVideo.generating") : t("copyVideo.genShotVideo")}</span>
+                                                <span className="text-[11px]">{videoRunning ? t("copyVideo.etaLong") : t("copyVideo.genShotVideo")}</span>
                                             </button>
                                         )}
                                     </td>

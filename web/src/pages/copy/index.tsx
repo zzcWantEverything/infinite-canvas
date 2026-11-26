@@ -23,10 +23,11 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { AssetCard } from "@/pages/copy/components/asset-card";
+import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ShotTable } from "@/pages/copy/components/shot-table";
 import { CopyImageSettingsBar, CopyVideoSettingsBar, createCopyGenSettings, type CopyGenSettings, type ShotOverride } from "@/components/copy/copy-settings-panel";
 import type { CopyMedia } from "@/components/copy/types";
-import { characterImagePrompt, characterStyleOf } from "@/config/character-styles";
+import { characterImagePrompt, characterStyleOf, ITEM_RULE, SCENE_RULE } from "@/config/character-styles";
 import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize } from "@/lib/media-size";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -61,6 +62,7 @@ import {
 import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
 import { awaitCloudUploads, serializeDoc } from "@/services/canvas-cloud";
 import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
+import { useAssetStore } from "@/stores/use-asset-store";
 import { useUserStore } from "@/stores/use-user-store";
 import type { ReferenceImage } from "@/types/image";
 
@@ -116,6 +118,10 @@ export default function CopyVideoPage() {
     const [shotImageHistory, setShotImageHistory] = useState<Record<string, CopyMedia[]>>({});
     const [shotVideoHistory, setShotVideoHistory] = useState<Record<string, CopyMedia[]>>({});
     const [mediaHistory, setMediaHistory] = useState<{ kind: "image" | "video"; shotId: string } | null>(null);
+    // 点图看大图 / 从「我的素材」选图
+    const [previewUrl, setPreviewUrl] = useState("");
+    const [libraryTarget, setLibraryTarget] = useState<string | null>(null);
+    const addAsset = useAssetStore((state) => state.addAsset);
     const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
     const [shotOverrides, setShotOverrides] = useState<Record<string, ShotOverride>>({});
     const [batchRunning, setBatchRunning] = useState<BatchKind>("");
@@ -185,11 +191,11 @@ export default function CopyVideoPage() {
     const imageConfigFor = (section: Section) =>
         section === "roles" ? { ...imageConfig, size: computeMediaSize(genSettings.imageScale, activeCharacterStyle.aspectRatio) } : imageConfig;
 
-    /** 生图提示词：角色走角色样式模板，场景/物品用「风格 + 名称 + 描述」。 */
+    /** 生图提示词：角色走角色样式模板；场景只要环境、物品只要本体，都不许有人物和文字。 */
     const itemPrompt = (item: CopyItem, section: Section) => {
         const filmStyle = analysis?.style || "";
         if (section === "roles") return characterImagePrompt({ name: item.name, description: item.description, filmStyle, styleId: genSettings.characterStyle });
-        return [filmStyle ? `风格：${filmStyle}` : "", item.name, item.description].filter(Boolean).join("，");
+        return [filmStyle ? `风格：${filmStyle}` : "", item.name, item.description, section === "scenes" ? SCENE_RULE : ITEM_RULE].filter(Boolean).join("，");
     };
 
     const videoCapability = videoModelCapability(genSettings.videoModel);    const resolutionOptions = useMemo(() => {
@@ -583,6 +589,15 @@ export default function CopyVideoPage() {
             const media = await uploadMediaFile(dataUrl, "image");
             const entry = { url: media.url, storageKey: media.storageKey };
             setShotImages((prev) => ({ ...prev, [shot.id]: entry }));
+            const shotIndex = analysis ? analysis.shots.findIndex((item) => item.id === shot.id) : -1;
+            addAsset({
+                kind: "image",
+                title: `${t("copyVideo.shot")} ${String(shotIndex + 1).padStart(2, "0")}`,
+                coverUrl: media.url,
+                tags: [],
+                source: "复刻视频",
+                data: { dataUrl: media.url, storageKey: media.storageKey, width: media.width || 0, height: media.height || 0, bytes: media.bytes, mimeType: media.mimeType },
+            });
             setShotImageHistory((prev) => ({ ...prev, [shot.id]: [entry, ...(prev[shot.id] || [])].slice(0, 12) }));
             setShotImageStatus((prev) => ({ ...prev, [shot.id]: "done" }));
         } catch (e) {
@@ -1074,6 +1089,8 @@ export default function CopyVideoPage() {
                                                 onGenerate={() => void runItemImage(item, "roles")}
                                                 onUpload={() => pickItemImage(item.id)}
                                                 onRemove={() => removeItem("roles", item.id)}
+                                                onPreview={() => itemImages[item.id]?.url && setPreviewUrl(itemImages[item.id].url)}
+                                                onPickLibrary={() => setLibraryTarget(item.id)}
                                                 aspectRatio={activeCharacterStyle.aspectRatio}
                                             />
                                         ))}
@@ -1127,6 +1144,8 @@ export default function CopyVideoPage() {
                                                 onGenerate={() => void runItemImage(item, "scenes")}
                                                 onUpload={() => pickItemImage(item.id)}
                                                 onRemove={() => removeItem("scenes", item.id)}
+                                                onPreview={() => itemImages[item.id]?.url && setPreviewUrl(itemImages[item.id].url)}
+                                                onPickLibrary={() => setLibraryTarget(item.id)}
                                             />
                                         ))}
                                         {analysis.items.map((item) => (
@@ -1142,6 +1161,8 @@ export default function CopyVideoPage() {
                                                 onGenerate={() => void runItemImage(item, "items")}
                                                 onUpload={() => pickItemImage(item.id)}
                                                 onRemove={() => removeItem("items", item.id)}
+                                                onPreview={() => itemImages[item.id]?.url && setPreviewUrl(itemImages[item.id].url)}
+                                                onPickLibrary={() => setLibraryTarget(item.id)}
                                             />
                                         ))}
                                         {!analysis.scenes.length && !analysis.items.length ? (
@@ -1274,6 +1295,7 @@ export default function CopyVideoPage() {
                                 onOpenImageHistory={(id) => setMediaHistory({ kind: "image", shotId: id })}
                                 onOpenVideoHistory={(id) => setMediaHistory({ kind: "video", shotId: id })}
                                 onDownloadVideo={(shot) => void downloadShotVideo(shot)}
+                                onPreviewImage={(url) => setPreviewUrl(url)}
                             />
                         </section>
 
@@ -1422,7 +1444,7 @@ export default function CopyVideoPage() {
                                                 {mediaHistory.kind === "video" ? (
                                                     <video src={media.url} controls playsInline className="h-full w-full object-contain" />
                                                 ) : (
-                                                    <img src={media.url} alt="" className="h-full w-full object-contain" />
+                                                    <img src={media.url} alt="" className="h-full w-full cursor-zoom-in object-contain" onClick={() => setPreviewUrl(media.url)} />
                                                 )}
                                             </div>
                                             <div className="p-2">
@@ -1448,6 +1470,23 @@ export default function CopyVideoPage() {
                     );
                 })() : null}
             </Modal>
+            {/* 看大图 */}
+            <Modal open={Boolean(previewUrl)} footer={null} width={880} onCancel={() => setPreviewUrl("")} destroyOnHidden styles={{ body: { padding: 0 } }}>
+                {previewUrl ? <img src={previewUrl} alt="" className="max-h-[80vh] w-full object-contain" /> : null}
+            </Modal>
+
+            {/* 从「我的素材」选一张图替换当前角色/场景/物品 */}
+            <AssetPickerModal
+                open={Boolean(libraryTarget)}
+                defaultTab="image"
+                onClose={() => setLibraryTarget(null)}
+                onInsert={(payload: InsertAssetPayload) => {
+                    const target = libraryTarget;
+                    setLibraryTarget(null);
+                    if (!target || payload.kind !== "image") return;
+                    setItemImages((prev) => ({ ...prev, [target]: { url: payload.dataUrl, storageKey: payload.storageKey || "" } }));
+                }}
+            />
         </main>
     );
 }

@@ -1,5 +1,7 @@
 import axios from "axios";
 
+import { NO_TEXT_RULE } from "@/config/character-styles";
+
 import { buildApiUrl, type AiConfig } from "@/stores/use-config-store";
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { readAxiosError } from "@/services/api/http";
@@ -764,10 +766,16 @@ export async function generateShotImage(config: AiConfig, shot: CopyShot, refere
 }
 
 /** 分镜图提示词：优先用模型写好的 imagePrompt，没有就按分镜字段拼一段。 */
+export const SIX_GRID_RULE = [
+    "输出一张六宫格分镜图：把这一镜头按时间顺序拆成 6 个关键瞬间，排成 3 列 × 2 行，从左到右、从上到下阅读。",
+    "六格必须是同一个镜头、同一个人物造型、同一场景与光线，只是动作与机位有连续变化；格与格之间留均匀的细白或细黑分隔。",
+    "六格画面里都不要出现任何文字：不要标题、字幕、标签、水印、Logo 和乱码。",
+].join("\n");
+
 export function shotImagePrompt(shot: CopyShot, style = ""): string {
     const camera = [shot.shotSize, shot.cameraAngle, shot.cameraMove].filter(Boolean).join("，");
     const body = shot.imagePrompt || [camera, shot.description, shot.performance].filter(Boolean).join("。");
-    return [style ? `风格：${style}` : "", body].filter(Boolean).join("\n");
+    return [style ? `风格：${style}` : "", body, SIX_GRID_RULE].filter(Boolean).join("\n");
 }
 
 /**
