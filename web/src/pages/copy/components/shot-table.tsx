@@ -1,15 +1,23 @@
-import { Fragment } from "react";
+import { Fragment, useMemo } from "react";
 import { Button, Input, Select } from "antd";
-import { ChevronDown, ChevronUp, Copy, Download, History, ImageIcon, ImagePlus, Info, Loader2, Sparkles, Trash2, Video } from "lucide-react";import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronUp, Download, History, ImageIcon, ImagePlus, Info, Loader2, Sparkles, Trash2, Video } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
-import type { CopyShot } from "@/services/api/copy-video";
+import type { CopyAssetSection, CopyItem, CopyResolvedAsset, CopyShot, ShotReferenceBinding } from "@/services/api/copy-video";
 import type { CopyMedia } from "@/components/copy/types";
 import type { ShotOverride } from "@/components/copy/copy-settings-panel";
+import { ShotAssetBar, ShotPromptEditor } from "@/pages/copy/components/shot-prompt-editor";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { cn } from "@/lib/utils";
+import type { ReferenceImage } from "@/types/image";
 
 type ShotTableProps = {
     shots: CopyShot[];
+    roles: CopyItem[];
+    scenes: CopyItem[];
+    items: CopyItem[];
+    itemImages: Record<string, CopyMedia>;
+    itemStatus: Record<string, string>;
     imageRatio: string;
     disabled: boolean;
     storyboards: Record<string, CopyMedia>;
@@ -22,11 +30,16 @@ type ShotTableProps = {
     overrides: Record<string, ShotOverride>;
     resolutionOptions: { value: string; label: string }[];
     secondsOptions: { value: string; label: string }[];
+    resolveVideoRefs: (shot: CopyShot) => { refs: ReferenceImage[]; bindings: ShotReferenceBinding[]; boundAssets: CopyResolvedAsset[] };
+    getCopyPrompt?: (shot: CopyShot) => string;
     onUpdate: (id: string, patch: Partial<CopyShot>) => void;
     onOverride: (id: string, patch: ShotOverride) => void;
     onRemove: (id: string) => void;
     onMove: (id: string, delta: -1 | 1) => void;
     onEdit: (shot: CopyShot) => void;
+    onBindAsset: (shotId: string, section: CopyAssetSection, name: string) => void;
+    onUnbindAsset: (shotId: string, section: CopyAssetSection, name: string) => void;
+    onGenerateAsset: (section: CopyAssetSection, id: string) => void;
     onPickStoryboard: (id: string) => void;
     onRemoveStoryboard: (id: string) => void;
     onGenerateImage: (shot: CopyShot) => void;
@@ -49,10 +62,36 @@ const ratioAspect = (ratio: string) => {
  * 信息条放分镜号/时间/单镜分辨率时长；内容行是视频描述词、原视频分镜图、图片描述词、图片预览、视频预览。
  */
 export function ShotTable(props: ShotTableProps) {
-    const { shots, imageRatio, disabled, storyboards, shotImages, shotVideos, shotImageHistory, shotVideoHistory, imageStatus, videoStatus, overrides, resolutionOptions, secondsOptions } = props;
+    const {
+        shots,
+        roles,
+        scenes,
+        items,
+        itemImages,
+        itemStatus,
+        imageRatio,
+        disabled,
+        storyboards,
+        shotImages,
+        shotVideos,
+        shotImageHistory,
+        shotVideoHistory,
+        imageStatus,
+        videoStatus,
+        overrides,
+        resolutionOptions,
+        secondsOptions,
+    } = props;
     const { t } = useTranslation();
     const copyText = useCopyText();
     const aspect = { aspectRatio: String(ratioAspect(imageRatio)) };
+    const allAssetsByName = useMemo(() => {
+        const map = new Map<string, CopyResolvedAsset>();
+        for (const item of roles) map.set(item.name, { id: item.id, name: item.name, description: item.description, kind: "role", section: "roles" });
+        for (const item of scenes) map.set(item.name, { id: item.id, name: item.name, description: item.description, kind: "scene", section: "scenes" });
+        for (const item of items) map.set(item.name, { id: item.id, name: item.name, description: item.description, kind: "item", section: "items" });
+        return map;
+    }, [roles, scenes, items]);
 
     return (
         <div className="w-full overflow-x-auto [scrollbar-width:thin]">
@@ -74,6 +113,7 @@ export function ShotTable(props: ShotTableProps) {
                         const imageRunning = imageStatus[shot.id] === "running";
                         const videoRunning = videoStatus[shot.id] === "running";
                         const ratio = overrides[shot.id] || {};
+                        const resolvedRefs = props.resolveVideoRefs(shot);
                         return (
                             <Fragment key={shot.id}>
                                 <tr>
@@ -115,6 +155,21 @@ export function ShotTable(props: ShotTableProps) {
                                                 />
                                                 <Button size="small" type="text" icon={<Info className="size-3.5" />} onClick={() => props.onEdit(shot)} title={t("copyVideo.shotDetail")} />
                                             </div>
+                                            <ShotAssetBar
+                                                boundAssets={resolvedRefs.boundAssets}
+                                                roles={roles}
+                                                scenes={scenes}
+                                                items={items}
+                                                itemImages={itemImages}
+                                                itemStatus={itemStatus}
+                                                refs={resolvedRefs.refs}
+                                                bindings={resolvedRefs.bindings}
+                                                disabled={disabled}
+                                                onBindAsset={(section, name) => props.onBindAsset(shot.id, section, name)}
+                                                onUnbindAsset={(section, name) => props.onUnbindAsset(shot.id, section, name)}
+                                                onGenerateAsset={props.onGenerateAsset}
+                                                onPreviewImage={props.onPreviewImage}
+                                            />
                                             <div className="ml-auto flex items-center gap-0.5">
                                                 <Button size="small" type="text" icon={<ChevronUp className="size-3.5" />} disabled={index === 0} onClick={() => props.onMove(shot.id, -1)} />
                                                 <Button size="small" type="text" icon={<ChevronDown className="size-3.5" />} disabled={index === shots.length - 1} onClick={() => props.onMove(shot.id, 1)} />
@@ -125,22 +180,20 @@ export function ShotTable(props: ShotTableProps) {
                                 </tr>
                                 <tr className="align-middle transition-colors [&>td]:border-b [&>td]:border-stone-200/70 [&>td]:bg-stone-50/60 hover:[&>td]:bg-stone-100/60 dark:[&>td]:border-stone-800 dark:[&>td]:bg-stone-900/40 dark:hover:[&>td]:bg-stone-900/70 [&>td:first-child]:border-l [&>td:first-child]:rounded-bl-xl [&>td:last-child]:border-r [&>td:last-child]:rounded-br-xl">
                                     <td className={cellClass}>
-                                        <div className="relative">
-                                            <Input.TextArea
-                                                value={shot.videoPrompt || ""}
-                                                onChange={(event) => props.onUpdate(shot.id, { videoPrompt: event.target.value })}
-                                                autoSize={{ minRows: 4, maxRows: 12 }}
-                                                placeholder={t("copyVideo.videoPromptPlaceholder")}
-                                            />
-                                            <button
-                                                type="button"
-                                                onClick={() => copyText(shot.videoPrompt || "")}
-                                                className="absolute right-2 top-2 rounded bg-stone-100 p-1 text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-600 dark:bg-stone-800 dark:text-stone-500 dark:hover:bg-stone-700"
-                                                title={t("copyVideo.copyPrompt")}
-                                            >
-                                                <Copy className="size-3.5" />
-                                            </button>
-                                        </div>
+                                        <ShotPromptEditor
+                                            value={shot.videoPrompt || ""}
+                                            placeholder={t("copyVideo.videoPromptPlaceholder")}
+                                            assets={resolvedRefs.boundAssets}
+                                            allAssetsByName={allAssetsByName}
+                                            itemImages={itemImages}
+                                            itemStatus={itemStatus}
+                                            bindings={resolvedRefs.bindings}
+                                            copyTitle={t("copyVideo.copyPrompt")}
+                                            onChange={(next) => props.onUpdate(shot.id, { videoPrompt: next })}
+                                            onCopy={() => copyText(props.getCopyPrompt ? props.getCopyPrompt(shot) : shot.videoPrompt || "")}
+                                            onPreviewImage={props.onPreviewImage}
+                                            onGenerateAsset={props.onGenerateAsset}
+                                        />
                                     </td>
                                     <td className={cellClass}>
                                         <div

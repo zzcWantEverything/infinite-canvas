@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, Modal, Popconfirm, Progress } from "antd";
+import { App, Button, Input, Modal, Popconfirm, Progress, type InputRef } from "antd";
 import {
     Check,
     ChevronDown,
     Clapperboard,
     Download,
     History,
+    Layers,
     Loader2,
     Map as MapIcon,
     Package,
     Palette,
     Pencil,
     Plus,
+    Replace,
     Save,
     Sparkles,
     Trash2,
@@ -24,13 +26,14 @@ import { useTranslation } from "react-i18next";
 
 import { AssetCard } from "@/pages/copy/components/asset-card";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { CopyReplaceBar } from "@/pages/copy/components/copy-replace-bar";
 import { ShotTable } from "@/pages/copy/components/shot-table";
 import { CopyImageSettingsBar, CopyVideoSettingsBar, createCopyGenSettings, type CopyGenSettings, type ShotOverride } from "@/components/copy/copy-settings-panel";
 import type { CopyMedia } from "@/components/copy/types";
 import { characterImagePrompt, characterStyleOf, ITEM_RULE, SCENE_RULE } from "@/config/character-styles";
 import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize } from "@/lib/media-size";
-import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { resolveModelRequestConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import {
     analyzeOverview,
     analyzeShotsWindow,
@@ -42,22 +45,33 @@ import {
     generateItemImage,
     generateShotImage,
     generateShotVideo,
-    groupFramesIntoWindows,
     mergeBatchAnalyses,
     mergeCasting,
     dropRepeatedDialogue,
     outlineForWindow,
     parseTranscript,
+    planAnalysisWindows,
+    renameAssetInShots,
+    replaceTermsInAnalysis,
+    resolveShotBoundAssets,
     sampleFrames,
+    shotPrompt,
     shotStartSeconds,
     spreadTranscript,
     sanitizeItemIds,
+    syncShotAssetsFromPrompt,
     transcribeAudio,
     transcriptForWindow,
+    unbindAssetInShot,
     type CopyAnalysis,
+    type CopyAssetSection,
     type CopyFrame,
     type CopyItem,
+    type CopyResolvedAsset,
     type CopyShot,
+    type ShotReferenceBinding,
+    type TermReplaceOptions,
+    type TermReplaceRule,
 } from "@/services/api/copy-video";
 import { createCopyHistory, deleteCopyHistory, formatHistoryTime, getCopyHistory, listCopyHistory, updateCopyHistory, type CopyHistorySummary } from "@/services/api/copy-history";
 import { awaitCloudUploads, serializeDoc } from "@/services/canvas-cloud";
@@ -151,6 +165,11 @@ export default function CopyVideoPage() {
     const [shotDraft, setShotDraft] = useState<CopyShot | null>(null);
     const [styleEditing, setStyleEditing] = useState(false);
     const [styleDraft, setStyleDraft] = useState("");
+    const [spaceEditing, setSpaceEditing] = useState(false);
+    const [spaceDraft, setSpaceDraft] = useState("");
+    const [replaceUndo, setReplaceUndo] = useState<CopyAnalysis | null>(null);
+    const replaceBarRef = useRef<HTMLDivElement>(null);
+    const replaceInputRef = useRef<InputRef>(null);
 
     const syncHistoryId = (id: number | null) => {
         historyIdRef.current = id;
@@ -195,7 +214,8 @@ export default function CopyVideoPage() {
     const itemPrompt = (item: CopyItem, section: Section) => {
         const filmStyle = analysis?.style || "";
         if (section === "roles") return characterImagePrompt({ name: item.name, description: item.description, filmStyle, styleId: genSettings.characterStyle });
-        return [filmStyle ? `风格：${filmStyle}` : "", item.name, item.description, section === "scenes" ? SCENE_RULE : ITEM_RULE].filter(Boolean).join("，");
+        const space = section === "scenes" && analysis?.spaceContext ? `所属统一空间：${analysis.spaceContext}` : "";
+        return [filmStyle ? `风格：${filmStyle}` : "", space, item.name, item.description, section === "scenes" ? SCENE_RULE : ITEM_RULE].filter(Boolean).join("，");
     };
 
     const videoCapability = videoModelCapability(genSettings.videoModel);    const resolutionOptions = useMemo(() => {
@@ -321,10 +341,10 @@ export default function CopyVideoPage() {
         setError("");
         setAnalysis(null);
         try {
-            // 1) 抽帧：上限 60 帧（1 秒 1 帧打底 + 切点首帧），长片按比例抽稀，但比原来的 32 帧密一倍。
+            // 1) 抽帧：上限 120 帧（≤90s 按 0.5 秒一帧打底 + 切点首帧），覆盖快剪与短时连续弹字。
             setAnalysisStage("frames");
             setAnalysisPercent(4);
-            const { frames, meta } = await extractSceneFrames(file, 60);
+            const { frames, meta } = await extractSceneFrames(file, 120);
             setAnalysisPercent(10);
             // 2) 音轨转写：失败降级为无台词，不阻塞分析。带时间戳的转写会按时间窗对齐到节拍。
             setAnalysisStage("transcribe");
@@ -347,20 +367,26 @@ export default function CopyVideoPage() {
             const overviewGrid = await buildFrameGrid(overviewFrames, meta.width / meta.height);
             const overview = await analyzeOverview(overviewGrid, meta, ANALYSIS_MODEL, sessionToken, formatTranscript(rawTranscript, segments));
             setAnalysisPercent(25);
-            // 4) 第二步：按时间窗逐段细化，串行——后面的窗要吃前面窗定下的资产和收尾状态。
-            const windows = groupFramesIntoWindows(frames, 12);
+            // 4) 第二步：按大纲 + 切点/句末边界智能切窗，串行——后面的窗要吃前面窗定下的资产、场景与收尾状态。
+            const windows = planAnalysisWindows(frames, meta.duration, {
+                outline: overview.outline,
+                cuts: meta.cuts,
+                segments,
+                maxWindowSeconds: 15,
+                minWindowSeconds: 5,
+                maxCells: 18,
+            });
             let result: CopyAnalysis | null = null;
             let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
             let previousEndState = "";
+            let previousScene = "";
             // 已说过的台词：传给下一窗，避免同一句被写两遍；合并后再兜一层去重。
             const usedDialogue: string[] = [];
             for (let index = 0; index < windows.length; index += 1) {
                 setAnalysisStage("window");
                 setWindowProgress({ current: index + 1, total: windows.length });
                 setAnalysisPercent(25 + Math.round((index / windows.length) * 68));
-                const windowFrames = windows[index];
-                const startTime = windowFrames[0].time;
-                const endTime = index + 1 < windows.length ? windows[index + 1][0].time : meta.duration;
+                const { start: startTime, end: endTime, frames: windowFrames } = windows[index];
                 const grid = await buildFrameGrid(windowFrames, meta.width / meta.height);
                 let partial: CopyAnalysis;
                 try {
@@ -371,10 +397,12 @@ export default function CopyVideoPage() {
                         endTime,
                         cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
                         casting,
-                        // 只给本窗自己的台词：解析不到时间戳时已经按句均分过，这里不再整段回退，
-                        // 否则同一句会在每个窗口各写一遍。
-                        transcript: transcriptForWindow(segments, startTime, endTime),
+                        // 只给本窗自己的台词：按句首时间严格半开区间分区，不重不漏。
+                        transcript: transcriptForWindow(segments, startTime, endTime, index === windows.length - 1),
                         outline: outlineForWindow(overview.outline, startTime, endTime),
+                        textStyle: overview.textStyle,
+                        spaceContext: overview.spaceContext,
+                        previousScene,
                         previousDialogue: usedDialogue.slice(-3).join("；").slice(0, 600),
                         previousEndState,
                     });
@@ -388,20 +416,33 @@ export default function CopyVideoPage() {
                 result = result ? mergeBatchAnalyses([result, partial]) : partial;
                 for (const shot of partial.shots) if (shot.dialogue?.trim()) usedDialogue.push(shot.dialogue.trim());
                 const last = partial.shots[partial.shots.length - 1];
-                if (last) previousEndState = last.videoPrompt.split("\n").slice(-1)[0] || last.description;
+                if (last) {
+                    const promptLines = last.videoPrompt
+                        .split(/\r?\n/)
+                        .map((line) => line.trim())
+                        .filter(Boolean);
+                    previousEndState = promptLines[promptLines.length - 1] || last.description;
+                    previousScene = last.scenes.join("、");
+                }
                 setAnalysisPercent(25 + Math.round(((index + 1) / windows.length) * 68));
             }
             if (!result) throw new Error(t("copyVideo.analyzeFailed"));
-            const finalResult: CopyAnalysis = dropRepeatedDialogue({
+            const mergedCasting = dropRepeatedDialogue({
                 ...result,
                 title: result.title && result.title !== "爆款转绘" ? result.title : overview.title,
                 ratio: result.ratio || overview.ratio,
                 style: result.style || overview.style,
+                spaceContext: result.spaceContext || overview.spaceContext || "",
                 roles: casting.roles,
                 scenes: casting.scenes,
                 items: casting.items,
             });
+            const finalResult: CopyAnalysis = {
+                ...mergedCasting,
+                shots: syncShotAssetsFromPrompt(mergedCasting.shots, mergedCasting),
+            };
             setAnalysis(finalResult);
+            setReplaceUndo(null);
             // 转写诊断留在记录里：下次「台词待核对」时能直接看出是没声音、解码失败还是格式没解析出来。
             setSourceMeta({
                 sceneCount: meta.sceneCount,
@@ -451,7 +492,43 @@ export default function CopyVideoPage() {
     };
 
     const updateShot = (id: string, patch: Partial<CopyShot>) => {
-        setAnalysis((prev) => (prev ? { ...prev, shots: prev.shots.map((shot) => (shot.id === id ? { ...shot, ...patch } : shot)) } : prev));
+        setAnalysis((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                shots: prev.shots.map((shot) => {
+                    if (shot.id !== id) return shot;
+                    const merged = { ...shot, ...patch };
+                    return typeof patch.videoPrompt === "string" ? syncShotAssetsFromPrompt([merged], prev)[0] : merged;
+                }),
+            };
+        });
+    };
+
+    const bindShotAsset = (shotId: string, section: CopyAssetSection, name: string) => {
+        setAnalysis((prev) => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                shots: prev.shots.map((shot) => {
+                    if (shot.id !== shotId) return shot;
+                    const existing = shot[section] ?? [];
+                    if (existing.includes(name)) return shot;
+                    return { ...shot, [section]: [...existing, name] };
+                }),
+            };
+        });
+    };
+
+    const unbindShotAsset = (shotId: string, section: CopyAssetSection, name: string) => {
+        setAnalysis((prev) => {
+            if (!prev) return prev;
+            const allNames = [...prev.roles, ...prev.scenes, ...prev.items].map((item) => item.name);
+            return {
+                ...prev,
+                shots: prev.shots.map((shot) => (shot.id === shotId ? unbindAssetInShot(shot, section, name, allNames) : shot)),
+            };
+        });
     };
 
     const removeShot = (id: string) => {
@@ -527,44 +604,92 @@ export default function CopyVideoPage() {
         });
     };
 
+    const toRefImage = (id: string, name: string, media: CopyMedia): ReferenceImage => ({
+        id,
+        name,
+        type: "image/png",
+        url: media.url,
+        dataUrl: media.url,
+        storageKey: media.storageKey || undefined,
+    });
+
+    const maxVideoRefs = useMemo(() => {
+        if (videoCapability?.maxImages && videoCapability.maxImages > 0) return Math.min(videoCapability.maxImages, 9);
+        return resolveModelRequestConfig(videoConfig, genSettings.videoModel).apiFormat === "gemini" ? 4 : 1;
+    }, [videoCapability, videoConfig, genSettings.videoModel]);
+
     /**
-     * 分镜涉及的角色/场景/物品图作为参考图，保证人物外观和场景一致性。
-     * 生图时把「原视频分镜图」放在最前面，让模型先对齐构图和机位；
-     * 生视频时优先用已生成的「图片预览」当首帧/参考，其次才退回角色/场景图。
+     * 单一真源：统一算出本分镜「绑定资产 + 实际上传参考图 + 1-based 图片N 映射」。
+     * 生视频、UI 状态徽标与复制描述词都共用它，保证提示词编号与上传参考图顺序 100% 一致。
      */
-    const assetRefsForShot = (shot: CopyShot) => {
-        if (!analysis) return [] as ReferenceImage[];
-        const refs: ReferenceImage[] = [];
-        const collect = (names: string[], items: CopyItem[]) => {
-            for (const name of names) {
-                const item = items.find((entry) => entry.name === name);
-                const media = item ? itemImages[item.id] : undefined;
-                if (item && media?.url) refs.push({ id: item.id, name: item.name, type: "image/png", dataUrl: media.url });
-            }
-        };
-        collect(shot.roles, analysis.roles);
-        collect(shot.scenes, analysis.scenes);
-        collect(shot.items, analysis.items);
-        if (!refs.length) {
-            const generated = (items: CopyItem[]) =>
-                items.filter((item) => itemImages[item.id]?.url).map((item) => ({ id: item.id, name: item.name, type: "image/png" as const, dataUrl: itemImages[item.id].url }));
-            refs.push(...generated(analysis.scenes), ...generated(analysis.roles));
+    const resolveShotVideoRefs = (shot: CopyShot): { refs: ReferenceImage[]; bindings: ShotReferenceBinding[]; boundAssets: CopyResolvedAsset[] } => {
+        const boundAssets = analysis ? resolveShotBoundAssets(shot, analysis) : [];
+        const entries: Array<{ ref: ReferenceImage; kind: ShotReferenceBinding["kind"]; id: string; name: string }> = [];
+        const frame = shotImages[shot.id];
+        if (frame?.url) {
+            const name = `${t("copyVideo.shot")}${shot.start || ""}`;
+            entries.push({
+                ref: toRefImage(`frame-${shot.id}`, name, frame),
+                kind: "storyboard",
+                id: `frame-${shot.id}`,
+                name,
+            });
         }
-        return refs;
+        for (const asset of boundAssets) {
+            const media = itemImages[asset.id];
+            if (!media?.url) continue;
+            entries.push({
+                ref: toRefImage(asset.id, asset.name, media),
+                kind: asset.kind,
+                id: asset.id,
+                name: asset.name,
+            });
+        }
+        if (!boundAssets.length && !entries.length && analysis) {
+            const appendFallback = (items: CopyItem[], kind: "role" | "scene") => {
+                for (const item of items) {
+                    const media = itemImages[item.id];
+                    if (!media?.url) continue;
+                    entries.push({ ref: toRefImage(item.id, item.name, media), kind, id: item.id, name: item.name });
+                }
+            };
+            appendFallback(analysis.roles, "role");
+            appendFallback(analysis.scenes, "scene");
+        }
+        const limited = entries.slice(0, maxVideoRefs);
+        return {
+            refs: limited.map((entry) => entry.ref),
+            bindings: limited.map((entry, idx) => ({
+                index: idx + 1,
+                name: entry.name,
+                kind: entry.kind,
+                id: entry.id,
+            })),
+            boundAssets,
+        };
     };
 
+    /**
+     * 分镜生图参考：优先把「原视频分镜图」放在最前面对齐构图和机位，
+     * 紧跟该镜绑定的角色/场景/物品图（带上 storageKey 防远程读图失败）。
+     */
     const imageRefsForShot = (shot: CopyShot): ReferenceImage[] => {
         const refs: ReferenceImage[] = [];
-        const storyboard = storyboards[shot.id]?.url;
-        if (storyboard) refs.push({ id: `story-${shot.id}`, name: `${t("copyVideo.shot")}${shot.start || ""}`, type: "image/png", dataUrl: storyboard });
-        return [...refs, ...assetRefsForShot(shot)].slice(0, 4);
-    };
-
-    const videoRefsForShot = (shot: CopyShot): ReferenceImage[] => {
-        const refs: ReferenceImage[] = [];
-        const frame = shotImages[shot.id]?.url;
-        if (frame) refs.push({ id: `frame-${shot.id}`, name: `${t("copyVideo.shot")}${shot.start || ""}`, type: "image/png", dataUrl: frame });
-        return [...refs, ...assetRefsForShot(shot)].slice(0, 4);
+        const storyboard = storyboards[shot.id];
+        if (storyboard?.url) refs.push(toRefImage(`story-${shot.id}`, `${t("copyVideo.shot")}${shot.start || ""}`, storyboard));
+        if (analysis) {
+            for (const asset of resolveShotBoundAssets(shot, analysis)) {
+                const media = itemImages[asset.id];
+                if (media?.url) refs.push(toRefImage(asset.id, asset.name, media));
+            }
+            if (refs.length === (storyboard?.url ? 1 : 0)) {
+                for (const item of [...analysis.scenes, ...analysis.roles]) {
+                    const media = itemImages[item.id];
+                    if (media?.url) refs.push(toRefImage(item.id, item.name, media));
+                }
+            }
+        }
+        return refs.slice(0, 6);
     };
 
     const runItemImage = async (item: CopyItem, section: Section = "items") => {
@@ -609,7 +734,12 @@ export default function CopyVideoPage() {
     const runShotVideo = async (shot: CopyShot) => {
         setShotStatus((prev) => ({ ...prev, [shot.id]: "running" }));
         try {
-            const media = await generateShotVideo(videoConfigFor(shot), shot, videoRefsForShot(shot), analysis?.style || "");
+            const { refs, bindings } = resolveShotVideoRefs(shot);
+            const media = await generateShotVideo(videoConfigFor(shot), shot, refs, analysis?.style || "", undefined, {
+                roles: analysis?.roles,
+                spaceContext: analysis?.spaceContext,
+                referenceBindings: bindings,
+            });
             const entry = { url: media.url, storageKey: media.storageKey };
             setShotVideos((prev) => ({ ...prev, [shot.id]: entry }));
             setShotVideoHistory((prev) => ({ ...prev, [shot.id]: [entry, ...(prev[shot.id] || [])].slice(0, 12) }));
@@ -800,9 +930,11 @@ export default function CopyVideoPage() {
             const normalized: CopyAnalysis = {
                 ...sanitized.analysis,
                 style: sanitized.analysis.style || "",
+                spaceContext: sanitized.analysis.spaceContext || "",
                 shots: (sanitized.analysis.shots || []).map((shot) => ({ ...shot, imagePrompt: shot.imagePrompt || "", videoPrompt: shot.videoPrompt || "" })),
             };
             setAnalysis(normalized);
+            setReplaceUndo(null);
             setSourceMeta(doc.source ?? null);
             if (doc.settings) setGenSettings({ ...createCopyGenSettings(config), ...doc.settings });
             const remapMedia = async (map?: Record<string, CopyMedia>) => {
@@ -873,8 +1005,23 @@ export default function CopyVideoPage() {
             return;
         }
         const voice = assetDraft.section === "roles" ? assetDraft.voice.trim() : "";
-        if (assetDraft.id) updateItem(assetDraft.section, assetDraft.id, { name, description, ...(assetDraft.section === "roles" ? { voice } : {}) });
-        else {
+        if (assetDraft.id) {
+            const targetId = assetDraft.id;
+            const targetSection = assetDraft.section;
+            setAnalysis((prev) => {
+                if (!prev) return prev;
+                const oldItem = prev[targetSection].find((item) => item.id === targetId);
+                const allNames = [...prev.roles, ...prev.scenes, ...prev.items].map((item) => item.name);
+                const updatedSection = prev[targetSection].map((item) =>
+                    item.id === targetId ? { ...item, name, description, ...(targetSection === "roles" ? { voice } : {}) } : item,
+                );
+                const updatedShots =
+                    oldItem && oldItem.name && oldItem.name !== name
+                        ? renameAssetInShots(prev.shots, targetSection, oldItem.name, name, allNames)
+                        : prev.shots;
+                return { ...prev, [targetSection]: updatedSection, shots: updatedShots };
+            });
+        } else {
             const item: CopyItem = { id: `${assetDraft.section}-${Date.now()}`, name, description, ...(assetDraft.section === "roles" ? { voice } : {}) };
             setAnalysis((prev) => (prev ? { ...prev, [assetDraft.section]: [...prev[assetDraft.section], item] } : prev));
         }
@@ -884,6 +1031,41 @@ export default function CopyVideoPage() {
     const saveStyle = () => {
         setAnalysis((prev) => (prev ? { ...prev, style: styleDraft.trim() } : prev));
         setStyleEditing(false);
+    };
+
+    const saveSpaceContext = () => {
+        setAnalysis((prev) => (prev ? { ...prev, spaceContext: spaceDraft.trim() } : prev));
+        setSpaceEditing(false);
+    };
+
+    const applyTermReplace = (rules: TermReplaceRule[], options: TermReplaceOptions) => {
+        if (!analysis) return;
+        const { analysis: next, stats } = replaceTermsInAnalysis(analysis, rules, options);
+        if (stats.totalMatches === 0) {
+            message.info(t("copyVideo.replaceMatchNone"));
+            return;
+        }
+        setReplaceUndo(analysis);
+        setAnalysis(next);
+        message.success(
+            t("copyVideo.replaceSuccess", {
+                total: stats.totalMatches,
+                shots: stats.shotCount,
+                assets: stats.assetCount,
+            }),
+        );
+    };
+
+    const undoTermReplace = () => {
+        if (!replaceUndo) return;
+        setAnalysis(replaceUndo);
+        setReplaceUndo(null);
+        message.success(t("copyVideo.replaceUndone"));
+    };
+
+    const focusReplaceBar = () => {
+        replaceBarRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        window.setTimeout(() => replaceInputRef.current?.focus(), 220);
     };
 
     const gridClass = "grid grid-cols-3 gap-2.5 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8";
@@ -1039,6 +1221,18 @@ export default function CopyVideoPage() {
                     </section>
                 ) : (
                     <div className="flex flex-col gap-5">
+                        {/* 一键替换品牌/产品 */}
+                        <div ref={replaceBarRef}>
+                            <CopyReplaceBar
+                                analysis={analysis}
+                                disabled={batchDisabled}
+                                canUndo={Boolean(replaceUndo)}
+                                inputRef={replaceInputRef}
+                                onApply={applyTermReplace}
+                                onUndo={undoTermReplace}
+                            />
+                        </div>
+
                         {/* 角色场景物品：统一生图参数 + 三块素材网格 + 风格 */}
                         <section className="overflow-hidden rounded-2xl border border-stone-200/70 bg-background dark:border-stone-800">
                             <div className="flex flex-col gap-3 border-b border-stone-200/70 bg-stone-50/70 px-4 py-3 xl:flex-row xl:items-center xl:justify-between dark:border-stone-800 dark:bg-stone-900/40">
@@ -1171,38 +1365,73 @@ export default function CopyVideoPage() {
                                     </div>
                                 </div>
 
-                                <div className="flex items-center gap-2 border-t border-stone-200/70 pt-3 dark:border-stone-800">
-                                    <Palette className="size-3.5 text-stone-400" />
-                                    <span className="text-xs text-stone-400 dark:text-stone-500">{t("copyVideo.style")}:</span>
-                                    {styleEditing ? (
-                                        <div className="flex flex-1 items-center gap-2">
-                                            <Input
-                                                size="small"
-                                                autoFocus
-                                                value={styleDraft}
-                                                onChange={(event) => setStyleDraft(event.target.value)}
-                                                onPressEnter={saveStyle}
-                                                onKeyDown={(event) => {
-                                                    if (event.key === "Escape") setStyleEditing(false);
+                                <div className="space-y-2 border-t border-stone-200/70 pt-3 dark:border-stone-800">
+                                    <div className="flex items-center gap-2">
+                                        <Palette className="size-3.5 text-stone-400" />
+                                        <span className="text-xs text-stone-400 dark:text-stone-500">{t("copyVideo.style")}:</span>
+                                        {styleEditing ? (
+                                            <div className="flex flex-1 items-center gap-2">
+                                                <Input
+                                                    size="small"
+                                                    autoFocus
+                                                    value={styleDraft}
+                                                    onChange={(event) => setStyleDraft(event.target.value)}
+                                                    onPressEnter={saveStyle}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === "Escape") setStyleEditing(false);
+                                                    }}
+                                                    placeholder={t("copyVideo.stylePlaceholder")}
+                                                />
+                                                <Button size="small" type="primary" icon={<Check className="size-3" />} onClick={saveStyle} />
+                                                <Button size="small" icon={<X className="size-3" />} onClick={() => setStyleEditing(false)} />
+                                            </div>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setStyleDraft(analysis.style || "");
+                                                    setStyleEditing(true);
                                                 }}
-                                                placeholder={t("copyVideo.stylePlaceholder")}
-                                            />
-                                            <Button size="small" type="primary" icon={<Check className="size-3" />} onClick={saveStyle} />
-                                            <Button size="small" icon={<X className="size-3" />} onClick={() => setStyleEditing(false)} />
-                                        </div>
-                                    ) : (
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setStyleDraft(analysis.style || "");
-                                                setStyleEditing(true);
-                                            }}
-                                            className="group flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs text-stone-600 transition-colors hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
-                                        >
-                                            <span className="line-clamp-2 text-left">{analysis.style || t("copyVideo.styleUnset")}</span>
-                                            <Pencil className="size-2.5 shrink-0 text-stone-300 transition-colors group-hover:text-stone-500 dark:text-stone-600" />
-                                        </button>
-                                    )}
+                                                className="group flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs text-stone-600 transition-colors hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
+                                            >
+                                                <span className="line-clamp-2 text-left">{analysis.style || t("copyVideo.styleUnset")}</span>
+                                                <Pencil className="size-2.5 shrink-0 text-stone-300 transition-colors group-hover:text-stone-500 dark:text-stone-600" />
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <Layers className="size-3.5 text-stone-400" />
+                                        <span className="text-xs text-stone-400 dark:text-stone-500">{t("copyVideo.spaceContext")}:</span>
+                                        {spaceEditing ? (
+                                            <div className="flex flex-1 items-center gap-2">
+                                                <Input
+                                                    size="small"
+                                                    autoFocus
+                                                    value={spaceDraft}
+                                                    onChange={(event) => setSpaceDraft(event.target.value)}
+                                                    onPressEnter={saveSpaceContext}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === "Escape") setSpaceEditing(false);
+                                                    }}
+                                                    placeholder={t("copyVideo.spaceContextPlaceholder")}
+                                                />
+                                                <Button size="small" type="primary" icon={<Check className="size-3" />} onClick={saveSpaceContext} />
+                                                <Button size="small" icon={<X className="size-3" />} onClick={() => setSpaceEditing(false)} />
+                                            </div>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSpaceDraft(analysis.spaceContext || "");
+                                                    setSpaceEditing(true);
+                                                }}
+                                                className="group flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs text-stone-600 transition-colors hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
+                                            >
+                                                <span className="line-clamp-2 text-left">{analysis.spaceContext || t("copyVideo.spaceContextUnset")}</span>
+                                                <Pencil className="size-2.5 shrink-0 text-stone-300 transition-colors group-hover:text-stone-500 dark:text-stone-600" />
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         </section>
@@ -1241,6 +1470,9 @@ export default function CopyVideoPage() {
                                     <Button size="small" icon={<Wand2 className="size-3.5" />} disabled={batchDisabled} onClick={fillImagePrompts}>
                                         {t("copyVideo.genImagePrompts")}
                                     </Button>
+                                    <Button size="small" icon={<Replace className="size-3.5" />} disabled={batchDisabled} onClick={focusReplaceBar}>
+                                        {t("copyVideo.replaceShortcut")}
+                                    </Button>
                                     <Button
                                         size="small"
                                         icon={<Sparkles className="size-3.5" />}
@@ -1267,6 +1499,11 @@ export default function CopyVideoPage() {
 
                             <ShotTable
                                 shots={analysis.shots}
+                                roles={analysis.roles}
+                                scenes={analysis.scenes}
+                                items={analysis.items}
+                                itemImages={itemImages}
+                                itemStatus={itemStatus}
                                 imageRatio={genSettings.imageRatio}
                                 disabled={batchDisabled}
                                 storyboards={storyboards}
@@ -1279,11 +1516,25 @@ export default function CopyVideoPage() {
                                 overrides={shotOverrides}
                                 resolutionOptions={resolutionOptions}
                                 secondsOptions={secondsOptions}
+                                resolveVideoRefs={resolveShotVideoRefs}
+                                getCopyPrompt={(shot) =>
+                                    shotPrompt(shot, analysis.style || "", {
+                                        roles: analysis.roles,
+                                        spaceContext: analysis.spaceContext,
+                                        referenceBindings: resolveShotVideoRefs(shot).bindings,
+                                    })
+                                }
                                 onUpdate={updateShot}
                                 onOverride={patchOverride}
                                 onRemove={removeShot}
                                 onMove={moveShot}
                                 onEdit={setShotDraft}
+                                onBindAsset={bindShotAsset}
+                                onUnbindAsset={unbindShotAsset}
+                                onGenerateAsset={(section, id) => {
+                                    const target = analysis[section].find((item) => item.id === id);
+                                    if (target) void runItemImage(target, section);
+                                }}
                                 onPickStoryboard={pickStoryboard}
                                 onRemoveStoryboard={(id) => setStoryboards((prev) => {
                                     const next = { ...prev };
