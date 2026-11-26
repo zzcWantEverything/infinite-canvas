@@ -93,19 +93,23 @@ cd web && npx prettier --check <file>
 
 - **入口**：侧栏「复刻视频」（`slug: "copy"`，`constant/navigation-tools.ts`）+ 路由 `/copy`。
   **2026-11-19 起线上常显**：去掉了 `import.meta.env.DEV` 过滤，侧栏与移动抽屉直接 `navigationTools.map`。
-- **流程**（`pages/copy/index.tsx` + `services/api/copy-video.ts`）：
+- **流程**（`pages/copy/index.tsx` + `services/api/copy-video.ts`），2026-11-26 起是**两段式**：
   1. 上传视频（≤150MB，**≤10 分钟**，超时直接拒绝）
   2. `extractSceneFrames`：纯 canvas 场景检测——采样步长 ≤60s **0.2s** / ≤5min 0.5s / 其余 1s；切点 =
      16 档直方图差分 + 逐像素差分（硬切 `pixel≥0.1 || hist≥0.3`，叠化看连续 ≥3 个软信号）；
-     **选帧 = 每秒一帧 + 末帧 + 每个切点首帧**，上限 32 帧（每帧 640 长边）
-  3. `buildFrameGrid`：按视频真实比例排版（1400×1568 预算内选单格面积最大的列数），标 `#序号 时间`；
-     横屏 32 帧≈4 列 316×177，竖屏≈8 列 175×311（之前固定 200×112 的 16:9 格，竖屏白丢一半像素）
-  3.5 `groupFramesIntoBatches`：按场景分批（≤10 镜 / ≤16 帧），串行请求，后一批带「已确认清单」；`mergeBatchAnalyses` 合并
+     **选帧 = 每秒一帧 + 末帧 + 每个切点首帧**，上限 **60 帧**（每帧 640 长边）
+  3. `buildFrameGrid`：按视频真实比例排版（1400×1568 预算内选单格面积最大的列数），标 `#序号 时间`
   4. `extractAudioWav`：`AudioContext.decodeAudioData` + `OfflineAudioContext` 重采样 16kHz 单声道、手写 WAV 编码
      （**不装 ffmpeg**；HEVC/AC3 等浏览器不认的编码返回 null 降级）
-  5. `transcribeAudio`：调 new-api `POST /api/user/copy/transcribe`（腾讯云 ASR 代理，**用 session token 不是渠道 apiKey**），拿带时间戳台词
-  6. `analyzeVideoGrid`：宫格图 + 元数据 + 台词一起给 `gpt-6-sol`，输出角色/场景/物品 + 分镜（分镜含 `dialogue` 字段）。
-     **接口是异步的**：`POST /api/user/copy/analyze` 只收 `{model, prompt, image}`（**不收 apiKey / baseUrl**），返回 jobId 后按 `GET /api/user/copy/analyze/:id` 每 2s 轮询；令牌由服务端自己从 `tokens` 表取、地址固定 loopback，用来规避链路 120s 代理超时。
+  5. `transcribeAudio` → `parseTranscript` / `spreadTranscript`：拿带时间戳台词，见下面「台词时间戳」
+  6. **第一步** `analyzeOverview`：抽稀 24 帧的全片宫格 + 整段台词 → 资产表（角色带 `voice` 声线）+ 分镜大纲 + 全片 style
+  7. **第二步** `analyzeShotsWindow`：`groupFramesIntoWindows(frames, 12)` 按时长切窗（12 秒一窗、窗内抽稀 16 格），
+     每窗带「已锁定资产 / 本窗切点 / 本窗台词 / previousEndState / previousDialogue」，串行执行；产出经 `clampWindowShots` 归一
+  8. 两个接口都是异步任务：`POST /api/user/copy/analyze` 只收 `{model, prompt, image}`（**不收 apiKey / baseUrl**），
+     返回 jobId 后每 2s 轮询 `GET /api/user/copy/analyze/:id`；令牌由服务端从 `tokens` 表取、地址固定 loopback
+- **分镜 = 生成单元**（对齐即刻）：一条分镜是**一次视频生成任务出片的 5~15 秒片段**，不是原片的每个切点。
+  `videoPrompt` 字段是出片的权威提示词（`【0-10秒】` + `0-4秒：在 @场景 中…` 逐节拍），`shotPrompt()` 直接用它，
+  不再由景别/画面/表演字段拼接；单元数量 ≈ 总时长 ÷ 10。
 - **模型调用必须走 `resolveModelRequestConfig`**：登录模式顶层 `config.apiKey` 是空的，真正可用的 relay key 在渠道上
   （启动时 `resolveRelayApiKey` 用 session token 换好）。直接读顶层 apiKey 会 401「无效的令牌」。
 - **图片节点的模型回显**（2026-11-18 修）：`resolveModelForCapability` 只在本地 `config.channels` 里匹配，服务器目录里的图片模型
@@ -115,6 +119,24 @@ cd web && npx prettier --check <file>
   `app-top-nav` 不再渲染 `AppConfigModal`、SSO 导入后不再弹配置、首页灵感空态的「去配置」按钮移除。
   `pages/config` 文件保留（恢复只需改回路由）。
 - **灵感广场已移除**：首页不再拉 `fetchPrompts`，只保留创作入口（标题+输入框+模式切换+建议词）。
+
+## 复刻视频生图与台词（2026-11-26）
+
+- **台词时间戳**：腾讯 ASR（`ResTextFormat=1`）返回 `[0:0.000,0:30.080]  整段台词…`——秒位只有一位、**整段可能只是一句**。
+  `parseTranscript` 时间码放宽到 1~2 位；`splitBySentence` 按标点拆句并按字数比例分摊时间；无时间戳时 `spreadTranscript` 按句均分；
+  `transcriptForWindow` **按句首时间唯一归属**（原来「区间重叠就带上」导致相邻分镜重复同一段台词）；`dropRepeatedDialogue` 兜底。
+  诊断字段写好进历史记录 `source`：`transcriptChars / transcriptSegments / transcriptHead / transcriptError`。
+- **生图约束**集中在 `config/character-styles.ts`：`NO_TEXT_RULE`（所有图禁文字）、`SCENE_RULE`（场景不许有人物/手/动物）、
+  `ITEM_RULE`（物品只出本体）；`shotImagePrompt` 追加 `SIX_GRID_RULE`（3 列 × 2 行六宫格）。
+- **默认生图模型** `preferredImageModel()` 优先 `tt-image-2`，没有才退回全局默认。
+- **原视频分镜图 = 整段多帧拼图**：按单元时间范围取帧（最多 9 格）用 `buildFrameGrid` 拼成一张。
+- **分镜生成历史**：`shotImageHistory / shotVideoHistory`（每镜最多 12 条），弹窗「使用此结果」切换，随 doc 保存；
+  生成的角色图/分镜图自动 `useAssetStore.addAsset` 进「我的素材」，卡片可从素材库选图。
+- **生成中文案**：视频显示「预计 5-10 分钟完成」（固定文案），图片只显示转圈。
+- **坑**：Python `re.sub` 的替换串会把 `
+` 解释成换行，用它改 `.join("
+")` 会把源码写坏（Unterminated string literal）；
+  多行 triple-quote replace 差一个字符就静默 0 命中，改前先 `grep -n` 定位。
 
 ## /copy 与云同步的坑（2026-11-20 ~ 11-21）
 
