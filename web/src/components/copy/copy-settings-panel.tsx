@@ -66,10 +66,16 @@ type ImageBarProps = {
     children?: ReactNode;
 };
 
-/** 角色场景物品上方的一条紧凑参数栏：角色样式 / 图片模型 / 比例 / 分辨率（+ 批量生图按钮）。 */
-export function CopyImageSettingsBar({ config, value, onChange, disabled, children }: ImageBarProps) {
+type CharacterStyleProps = {
+    value: string;
+    onChange: (styleId: string) => void;
+    disabled?: boolean;
+};
+
+/** 角色样式选择器：仅作用于角色资产图，放在「角色」分栏标题旁，避免误以为会影响场景和物品。 */
+export function CharacterStyleSelect({ value, onChange, disabled }: CharacterStyleProps) {
     const { t } = useTranslation();
-    const active = characterStyleOf(value.characterStyle);
+    const active = characterStyleOf(value);
     const styleOptions = CHARACTER_STYLES.map((style) => ({
         value: style.id,
         label: (
@@ -82,23 +88,30 @@ export function CopyImageSettingsBar({ config, value, onChange, disabled, childr
         ),
     }));
     return (
+        <div className={pill}>
+            <span className={pillLabel}>{t("copyVideo.characterStyle")}</span>
+            <span className={divider} />
+            <Select
+                variant="borderless"
+                size="small"
+                className="!w-[124px]"
+                value={value}
+                disabled={disabled}
+                options={styleOptions}
+                labelRender={() => <span className="text-xs">{t(active.nameKey)}</span>}
+                onChange={onChange}
+                popupMatchSelectWidth={false}
+                styles={{ popup: { root: { minWidth: 260 } } }}
+            />
+        </div>
+    );
+}
+
+/** 角色场景物品上方的一条紧凑参数栏：图片模型 / 比例 / 分辨率（+ 批量生图按钮）。 */
+export function CopyImageSettingsBar({ config, value, onChange, disabled, children }: ImageBarProps) {
+    const { t } = useTranslation();
+    return (
         <div className="flex flex-wrap items-center gap-2">
-            <div className={pill}>
-                <span className={pillLabel}>{t("copyVideo.characterStyle")}</span>
-                <span className={divider} />
-                <Select
-                    variant="borderless"
-                    size="small"
-                    className="!w-[124px]"
-                    value={value.characterStyle}
-                    disabled={disabled}
-                    options={styleOptions}
-                    labelRender={() => <span className="text-xs">{t(active.nameKey)}</span>}
-                    onChange={(id) => onChange({ characterStyle: id })}
-                    popupMatchSelectWidth={false}
-                    styles={{ popup: { root: { minWidth: 260 } } }}
-                />
-            </div>
             <div className={pill}>
                 <span className={pillLabel}>{t("copyVideo.imageModel")}</span>
                 <span className={divider} />

@@ -7,13 +7,13 @@
  */
 
 /** 所有生成图通用的收尾约束：模型很容易自己往画面里加标题、水印、标签。 */
-export const NO_TEXT_RULE = "画面中不要出现任何文字：不要标题、字幕、标签、说明文字、水印、Logo、品牌名和乱码。";
+export const NO_TEXT_RULE = "画面中不要出现任何文字：不要标题、字幕、标签、注释、图例、水印、Logo、品牌名和乱码。";
 
-/** 场景图：只要环境，不要人。 */
-export const SCENE_RULE = "只表现场景本身：画面中不要出现任何人物、人体、面部、手部或动物，也不要有任何文字；构图保持空旷，方便后期把角色放进去。";
+/** 场景图：只要单一空景环境，不要人物、多宫格或拼接。 */
+export const SCENE_RULE = "严格输出单一完整画面：仅构图一张空场景全貌环境图，严禁多宫格、拼图、分屏、多角度视图、局部放大框、文字标注或框线分隔；只表现场景环境本身，画面中不要出现任何人物、人体、面部、手部或动物，构图留有主体活动空间，方便后续合成。";
 
-/** 物品图：只要这一件物品。 */
-export const ITEM_RULE = "只展示当前这一件物品本体：主体完整、清晰、无遮挡，画面中不要出现人物、手部、动物、其他物品和复杂场景，背景简洁，也不要文字。";
+/** 物品图：只要这一件物品的单一视角静物主图，严禁三视图/细节框/电商排版拼接图。 */
+export const ITEM_RULE = "严格输出单一物品静物主图：画面中仅展示这一件完整物品的单个立体视角（斜正面单一角度），严禁生成三视图/四视图/正面侧面背面多视角拼图，严禁出现放大细节框、结构拆解图、剖面图、电商卖点排版图或分栏格子；纯色或极简素净桌面背景，主体清晰完整无遮挡，不要出现人物、手部、动物、其他无关物品，也不要出现任何汉字、英文标签、标注框、花字或品牌文字。";
 
 export type CharacterPromptInput = {
     /** 角色名 */
@@ -111,4 +111,42 @@ export function characterStyleOf(id: string | undefined): CharacterStyle {
 export function characterImagePrompt(input: CharacterPromptInput & { styleId?: string }): string {
     return `${characterStyleOf(input.styleId).prompt(input)}
 ${NO_TEXT_RULE}`;
+}
+
+export type ScenePromptInput = {
+    name: string;
+    description: string;
+    filmStyle: string;
+    spaceContext?: string;
+};
+
+export type ItemPromptInput = {
+    name: string;
+    description: string;
+    filmStyle: string;
+};
+
+/** 场景生图提示词：单一空景全貌（不走人物设定模板），显式禁止多视角拼图与人物文字。 */
+export function sceneImagePrompt({ name, description, filmStyle, spaceContext }: ScenePromptInput): string {
+    const lines = [
+        SCENE_RULE,
+        `场景名称：${name}`,
+        description ? `场景描述：${description}` : "",
+        spaceContext ? `所属统一空间：${spaceContext}` : "",
+        filmStyle ? `摄影质感与光影：${filmStyle}` : "",
+        NO_TEXT_RULE,
+    ].filter(Boolean);
+    return lines.join("\n");
+}
+
+/** 物品生图提示词：单一角度商品/道具主图（不走人物设定模板），显式禁止多视图/细节框/卖点字样。 */
+export function itemImagePrompt({ name, description, filmStyle }: ItemPromptInput): string {
+    const lines = [
+        ITEM_RULE,
+        `物品名称：${name}`,
+        description ? `外观材质描述：${description}` : "",
+        filmStyle ? `光影质感参考：${filmStyle}` : "",
+        NO_TEXT_RULE,
+    ].filter(Boolean);
+    return lines.join("\n");
 }

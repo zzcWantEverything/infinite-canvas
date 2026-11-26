@@ -452,7 +452,7 @@ export default {
         historyProjects: "Projects",
         historyEmptyProject: "No projects yet",
         assetsTitle: "Characters · Scenes · Props",
-        assetsSubtitle: "Shared image settings",
+        assetsSubtitle: "Character style applies only to characters; scenes and props render as single views",
         characterStyle: "Character style",
         characterStyles: {
             sheet: { name: "Character sheet", description: "Front, side and back full body + face close-up" },

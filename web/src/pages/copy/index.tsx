@@ -28,9 +28,9 @@ import { AssetCard } from "@/pages/copy/components/asset-card";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CopyReplaceBar } from "@/pages/copy/components/copy-replace-bar";
 import { ShotTable } from "@/pages/copy/components/shot-table";
-import { CopyImageSettingsBar, CopyVideoSettingsBar, createCopyGenSettings, type CopyGenSettings, type ShotOverride } from "@/components/copy/copy-settings-panel";
+import { CharacterStyleSelect, CopyImageSettingsBar, CopyVideoSettingsBar, createCopyGenSettings, type CopyGenSettings, type ShotOverride } from "@/components/copy/copy-settings-panel";
 import type { CopyMedia } from "@/components/copy/types";
-import { characterImagePrompt, characterStyleOf, ITEM_RULE, SCENE_RULE } from "@/config/character-styles";
+import { characterImagePrompt, characterStyleOf, itemImagePrompt, sceneImagePrompt } from "@/config/character-styles";
 import { videoModelCapability } from "@/config/video-models";
 import { computeMediaSize } from "@/lib/media-size";
 import { resolveModelRequestConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -185,6 +185,8 @@ export default function CopyVideoPage() {
     const imageConfig = useMemo(
         () => ({
             ...config,
+            // 隔离全局生图系统提示词，避免用户画布预设（如多视图/设定图）污染复刻页面分镜或物品生图
+            systemPrompt: "",
             model: genSettings.imageModel,
             imageModel: genSettings.imageModel,
             size: computeMediaSize(genSettings.imageScale, genSettings.imageRatio),
@@ -210,12 +212,12 @@ export default function CopyVideoPage() {
     const imageConfigFor = (section: Section) =>
         section === "roles" ? { ...imageConfig, size: computeMediaSize(genSettings.imageScale, activeCharacterStyle.aspectRatio) } : imageConfig;
 
-    /** 生图提示词：角色走角色样式模板；场景只要环境、物品只要本体，都不许有人物和文字。 */
+    /** 生图提示词：角色走角色样式模板；场景与物品走各自独立的单图模板，严禁套用人物多视图/细节框样式。 */
     const itemPrompt = (item: CopyItem, section: Section) => {
         const filmStyle = analysis?.style || "";
         if (section === "roles") return characterImagePrompt({ name: item.name, description: item.description, filmStyle, styleId: genSettings.characterStyle });
-        const space = section === "scenes" && analysis?.spaceContext ? `所属统一空间：${analysis.spaceContext}` : "";
-        return [filmStyle ? `风格：${filmStyle}` : "", space, item.name, item.description, section === "scenes" ? SCENE_RULE : ITEM_RULE].filter(Boolean).join("，");
+        if (section === "scenes") return sceneImagePrompt({ name: item.name, description: item.description, filmStyle, spaceContext: analysis?.spaceContext });
+        return itemImagePrompt({ name: item.name, description: item.description, filmStyle });
     };
 
     const videoCapability = videoModelCapability(genSettings.videoModel);    const resolutionOptions = useMemo(() => {
@@ -1255,19 +1257,22 @@ export default function CopyVideoPage() {
                             <div className="space-y-4 p-4">
                                 {/* 角色 */}
                                 <div>
-                                    <div className="mb-2 flex items-center justify-between">
+                                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                                         <h3 className="flex items-center gap-1.5 text-xs text-stone-500 dark:text-stone-400">
                                             <User className="size-3" />
                                             {t("copyVideo.roles")}
                                             <span className="text-stone-300 dark:text-stone-600">({analysis.roles.length})</span>
                                         </h3>
-                                        <button
-                                            type="button"
-                                            onClick={() => openAddAsset("roles")}
-                                            className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-stone-500 transition-colors hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
-                                        >
-                                            <Plus className="size-3" /> {t("copyVideo.add")}
-                                        </button>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <CharacterStyleSelect value={genSettings.characterStyle} onChange={(characterStyle) => patchSettings({ characterStyle })} disabled={batchDisabled} />
+                                            <button
+                                                type="button"
+                                                onClick={() => openAddAsset("roles")}
+                                                className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-stone-500 transition-colors hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+                                            >
+                                                <Plus className="size-3" /> {t("copyVideo.add")}
+                                            </button>
+                                        </div>
                                     </div>
                                     <div className={gridClass}>
                                         {analysis.roles.map((item) => (

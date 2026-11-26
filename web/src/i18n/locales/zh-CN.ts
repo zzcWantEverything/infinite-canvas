@@ -452,8 +452,8 @@ export default {
         historyProjects: "历史项目",
         historyEmptyProject: "暂无历史项目",
         assetsTitle: "角色场景物品",
-        assetsSubtitle: "统一生图参数",
-        characterStyle: "角色样式",
+        assetsSubtitle: "角色可单独选择设定图样式，场景与物品按单张主图生成",
+        characterStyle: "角色图样式",
         characterStyles: {
             sheet: { name: "人物资产图", description: "正面/侧面/背面全身 + 面部特写" },
             fourView: { name: "人物四视图", description: "脸部特写 + 正面/侧面/背面全身" },
