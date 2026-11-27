@@ -33,33 +33,7 @@ export type ModelPickerGroup = {
 };
 
 const DISPLAY_SEPARATOR = " · ";
-
-/**
- * 前端侧的分组覆盖：目录里既没有 variant_group、展示名里也没有「 · 」的模型，
- * 默认会各自成组，看起来是一堆散落条目。这里按模型名把它们并到指定分组下。
- *
- * 灵境（ai.ljvideo.cn）那批特惠版 Seedance 展示名是整串产品名，运营不想改后端
- * 展示名，所以只在前端把它们并成「特惠优选」一组；取值仍是「渠道::模型名」。
- */
-const MODEL_GROUP_OVERRIDES: Record<string, string> = {
-    "model-380022936238553345": "特惠优选",
-    "model-380964836437125373": "特惠优选",
-    "model-382943247602802689": "特惠优选",
-    "model-380066518676792496": "特惠优选",
-    "model-381704455537552016": "特惠优选",
-    "model-381747039920187845": "特惠优选",
-    // 2026-11 第二批灵境模型（全模态旗舰、wan3）同样归到这组。
-    "model-383098755454392198": "特惠优选",
-    "model-382599102724038660": "特惠优选",
-    // 2026-11-24 上游轮换后新上架的两条（额度较多版 / 2.0 933）。
-    "model-383550803517893365": "特惠优选",
-    "model-102154015462132391": "特惠优选",
-    // 2026-11-26 第三批：上游「特惠」系列全量接入。
-    "model-372005821824888842": "特惠优选",
-    "model-1793543789907796": "特惠优选",
-    "model-1794401559418981": "特惠优选",
-    "model-384018563792363524": "特惠优选",
-};
+const DYNAMIC_PROMO_PATTERN = /^model-\d+$/;
 
 /** 分组标题里已经写了「特惠」，条目名再去掉重复的「特惠版」前缀。 */
 function overrideItemLabel(displayName: string) {
@@ -79,27 +53,45 @@ export function splitModelDisplayName(displayName: string) {
 }
 
 /**
- * 按「variant_group 卡片 → 展示名前缀 → 自身」的优先级把下拉项归组。
+ * 按「variant_group 卡片 → 展示名前缀 → 动态特惠归组 → 自身」的优先级把下拉项归组。
  * 顺序沿用入参顺序：第一条出现的项决定该组在列表里的位置。
  */
 export function groupModelOptions(options: ModelPickerOptionMeta[]): ModelPickerGroup[] {
     const groups = new Map<string, { key: string; label: string; items: Array<{ value: string; label?: string }> }>();
 
     for (const option of options) {
-        const override = MODEL_GROUP_OVERRIDES[option.name];
-        if (override) {
-            const key = `override:${override}`;
-            const displayName = option.variantDisplayName ?? option.card?.displayName ?? option.name;
+        const isExplicitVariantGroup = Boolean(
+            option.card && (option.card.variantCount > 1 || option.card.key !== option.name)
+        );
+        if (isExplicitVariantGroup && option.card) {
+            const key = `card:${option.card.key}`;
+            const rawLabel = option.variantDisplayName ?? option.card.displayName ?? option.name;
+            const label = option.card.displayName.includes("特惠")
+                ? overrideItemLabel(rawLabel)
+                : rawLabel;
             const existing = groups.get(key);
             if (existing) {
-                existing.items.push({ value: option.value, label: overrideItemLabel(displayName) });
+                existing.items.push({ value: option.value, label });
                 continue;
             }
-            groups.set(key, { key, label: override, items: [{ value: option.value, label: overrideItemLabel(displayName) }] });
+            groups.set(key, { key, label: option.card.displayName, items: [{ value: option.value, label }] });
             continue;
         }
-        // 多线路卡片：卡片名就是分组，线路名交给条目。单线路卡片的卡片名和线路名是同一串字，
-        // 这时才去看展示名里有没有「分组 · 线路名」的写法。
+
+        const displayName = option.variantDisplayName ?? option.card?.displayName ?? option.name;
+        if (DYNAMIC_PROMO_PATTERN.test(option.name) && displayName.includes("特惠")) {
+            const key = "override:特惠优选";
+            const label = overrideItemLabel(displayName);
+            const existing = groups.get(key);
+            if (existing) {
+                existing.items.push({ value: option.value, label });
+                continue;
+            }
+            groups.set(key, { key, label: "特惠优选", items: [{ value: option.value, label }] });
+            continue;
+        }
+
+        // 单线路卡片的卡片名和线路名是同一串字，去看展示名里有没有「分组 · 线路名」的写法。
         const split = option.card && option.card.variantCount <= 1 ? splitModelDisplayName(option.card.displayName) : null;
         // 前缀分组单独加前缀，避免和同名的 variant_group 卡片撞车。
         const key = split ? `prefix:${split.label}` : option.card?.key || option.name;

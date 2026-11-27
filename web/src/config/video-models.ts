@@ -123,17 +123,24 @@ function builtinCapability(name: string) {
 /**
  * 进面板时默认落到哪一档分辨率。
  *
- * 按分辨率分档计价的模型，档差可能很大（特惠按秒款：480P 0.12 元/秒、720P 0.21 元/秒，
- * 乘倍率后 0.18 与 0.315，30 秒差 4 元）。这类模型先落到它最低的一档，用户看到的下拉报价
- * 和面板实价才是同一个数；想用高画质再自己点。
+ * 动态从目录能力声明读取 default 分辨率；若按秒计费且提供多档分辨率但未显式指定
+ * default，则默认落到最低档，保证下拉报价与面板实价一致。
  */
-const modelDefaultResolutions: Record<string, string> = {
-    "model-380066518676792496": "480",
-};
-
-/** 该模型指定的默认分辨率档；没有指定返回 undefined。 */
-export function videoModelDefaultResolution(model: string) {
-    return modelDefaultResolutions[model];
+export function videoModelDefaultResolution(model: string): string | undefined {
+    const name = model.includes("::") ? model.slice(model.lastIndexOf("::") + 2) : model;
+    const variant = catalogVariant(name);
+    const capability = variant?.capabilities;
+    if (!capability) return undefined;
+    const resField = capability.fields?.resolution;
+    const explicitDefault = typeof resField?.default === "string"
+        ? resField.default.trim().replace(/p$/i, "")
+        : "";
+    if (explicitDefault) return explicitDefault;
+    if (capability.billingUnit === "second" && variant) {
+        const cap = catalogVideoCapability(variant);
+        if (cap && cap.resolutions.length > 1) return cap.resolutions[0];
+    }
+    return undefined;
 }
 
 export function videoModelCapability(model: string): VideoModelCapability | null {
