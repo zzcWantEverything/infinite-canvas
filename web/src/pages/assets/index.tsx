@@ -514,7 +514,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         {asset.kind === "text" ? (
                             <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{asset.data.content}</Typography.Paragraph>
                         ) : asset.kind === "video" ? (
-                            <video src={asset.data.url} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
+                            <video src={asset.data.url} poster={asset.coverUrl || undefined} controls preload={asset.data.url?.startsWith("blob:") ? "metadata" : "none"} className="mt-2 aspect-video w-full rounded-lg bg-black" />
                         ) : (
                             <Typography.Text className="mt-2 block">
                                 {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}

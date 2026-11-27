@@ -457,7 +457,14 @@ function AssetCover({ asset }: { asset: Asset }) {
     if (asset.kind === "text") return <div className="size-full overflow-hidden whitespace-pre-wrap break-words p-2.5 text-[11px] leading-snug opacity-80">{asset.data.content}</div>;
     if (asset.kind === "video") {
         if (asset.coverUrl) return <img src={asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
-        return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        if (asset.data.url?.startsWith("blob:")) {
+            return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        }
+        return (
+            <div className="flex size-full flex-col items-center justify-center gap-1 bg-stone-900/80 text-stone-300">
+                <Video className="size-6 opacity-75" />
+            </div>
+        );
     }
     return <img src={asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
 }

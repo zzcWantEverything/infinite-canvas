@@ -19,6 +19,7 @@ import { useCanvasSyncStore } from "@/stores/canvas/use-canvas-sync-store";
 type ProjectLink = { cloudId: string; revision: number };
 
 const projectMap = localforage.createInstance({ name: "infinite-canvas", storeName: "cloud_project_map" });
+const lastPushedPayload = new Map<string, string>();
 
 async function getLink(localId: string): Promise<ProjectLink | null> {
     return projectMap.getItem<ProjectLink>(localId).catch(() => null);
@@ -65,16 +66,23 @@ export async function pushProjectToCloud(project: CanvasProject) {
         // 等还在上传的素材落地，serializeDoc 才能把它们替换成 object_key，而不是存成本地键。
         await awaitCloudUploads();
         const doc = await serializeDoc(project);
+        const payloadKey = `${project.title}\0${doc}`;
+        if (lastPushedPayload.get(link.cloudId) === payloadKey) {
+            useCanvasSyncStore.getState().setSaved();
+            return;
+        }
         const res = await saveCloudProject(link.cloudId, project.title, doc, link.revision);
         if (res.conflict) {
             // 别处已经改过：以服务端为准覆盖本地，避免双方互相覆盖。
             const remote = res.project;
             if (remote) {
                 await setLink(project.id, { cloudId: link.cloudId, revision: remote.revision });
+                lastPushedPayload.set(link.cloudId, `${remote.title}\0${remote.doc || ""}`);
                 useCanvasStore.getState().replaceProjects([cloudToLocal(remote, project.id), ...useCanvasStore.getState().projects.filter((p) => p.id !== project.id)]);
             }
         } else if (res.project) {
             await setLink(project.id, { cloudId: link.cloudId, revision: res.project.revision });
+            lastPushedPayload.set(link.cloudId, payloadKey);
         }
         useCanvasSyncStore.getState().setSaved();
     } catch (error) {
@@ -91,28 +99,34 @@ export async function pullCloudToLocal() {
         const list = await listCloudProjects();
         const local = useCanvasStore.getState().projects;
 
-        // cloudId -> localId
-        const cloudToLocalId = new Map<string, string>();
+        // cloudId -> { localId, revision }
+        const cloudToLocalLink = new Map<string, { localId: string; revision: number }>();
         for (const p of local) {
             const link = await getLink(p.id);
-            if (link) cloudToLocalId.set(link.cloudId, p.id);
+            if (link) cloudToLocalLink.set(link.cloudId, { localId: p.id, revision: link.revision });
         }
 
         const merged = [...local];
+        let changed = false;
         for (const cloud of list) {
-            // 先把云端文档里残留的本地键（video:xxx）修回 object_key 并重推，
-            // 换设备/换浏览器也能正常加载历史素材；失败不影响下面的拉取。
-            await repairCloudProjectMediaKeys(cloud.id).catch(() => false);
-            const detail = await getCloudProject(cloud.id);
-            if (!detail) continue;
-            const localId = cloudToLocalId.get(cloud.id) ?? cloud.id;
-            await setLink(localId, { cloudId: cloud.id, revision: detail.revision });
-            const project = cloudToLocal(detail, localId);
+            const existing = cloudToLocalLink.get(cloud.id);
+            const localId = existing?.localId ?? cloud.id;
             const idx = merged.findIndex((p) => p.id === localId);
+            // 版本号与本地一致且本地已有完整数据时，跳过重复拉取全文，节省流量。
+            if (existing && existing.revision === cloud.revision && idx >= 0) continue;
+
+            const fetched = await getCloudProject(cloud.id);
+            if (!fetched) continue;
+            // 把云端文档里残留的本地键（video:xxx）就地修回 object_key，复用本次详情不再二次 GET。
+            const detail = (await repairCloudProjectMediaKeys(cloud.id, fetched).catch(() => fetched)) || fetched;
+            await setLink(localId, { cloudId: cloud.id, revision: detail.revision });
+            lastPushedPayload.set(cloud.id, `${detail.title}\0${detail.doc || ""}`);
+            const project = cloudToLocal(detail, localId);
             if (idx >= 0) merged[idx] = project;
             else merged.unshift(project);
+            changed = true;
         }
-        useCanvasStore.getState().replaceProjects(merged);
+        if (changed) useCanvasStore.getState().replaceProjects(merged);
     } catch {
         // 拉取失败静默，保留本地数据。
     }

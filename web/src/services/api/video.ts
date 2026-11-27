@@ -24,7 +24,7 @@ type RequestOptions = { signal?: AbortSignal };
 type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: ReferenceAudio[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
-export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
+export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; objectKey?: string; bytes?: number };
 export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin" | "ark" | "qora"; model: string };
 type GeminiInlineData = { bytesBase64Encoded: string; mimeType: string };
 type GeminiVideoOperation = {
@@ -190,6 +190,14 @@ function videoPluginResult(result: unknown): VideoGenerationResult {
 }
 
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
+    if (result.objectKey && result.url) {
+        return {
+            url: result.url,
+            storageKey: result.objectKey,
+            bytes: result.bytes || 0,
+            mimeType: result.mimeType || "video/mp4",
+        };
+    }
     if (result.blob) return uploadMediaFile(result.blob, "video");
     if (result.url) {
         try {
@@ -254,6 +262,19 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (video.status === "completed") {
             try {
+                // 优先走服务端内网直存 COS：只回 ~450B JSON 元数据，免去 CVM 下行 25MB 视频和浏览器二次上传。
+                const meta = (
+                    await axios.get<{ object_key?: string; url?: string; bytes?: number; mime_type?: string; fallback?: boolean }>(
+                        aiApiUrl(config, `/videos/${task.id}/content?format=json`),
+                        { headers: aiHeaders(config), signal: options?.signal },
+                    )
+                ).data;
+                if (meta?.object_key && meta?.url) {
+                    return {
+                        status: "completed",
+                        result: { objectKey: meta.object_key, url: meta.url, bytes: meta.bytes || 0, mimeType: meta.mime_type || "video/mp4" },
+                    };
+                }
                 const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
                 await assertVideoBlob(content.data);
                 return { status: "completed", result: { blob: content.data } };
@@ -587,17 +608,51 @@ async function resolveArkReferenceUrl(config: AiConfig, image: ReferenceImage): 
     if (!blob && candidate.startsWith("blob:")) blob = await (await fetch(candidate)).blob();
     if (!blob) throw new Error(apiText("referenceImageReadFailed"));
 
+    const uploadBlob = await compressReferenceImage(blob);
     const form = new FormData();
-    const ext = blob.type.split("/")[1] || "png";
-    form.append("file", blob, `ref.${ext}`);
+    const ext = (uploadBlob.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    form.append("file", uploadBlob, `ref.${ext}`);
 
-    const resp = await fetch(withLocalProxy(`${imgbedUrl}/upload`), { method: "POST", body: form });
+    const headers: Record<string, string> = {};
+    // 仅对同源内置图床（/imgbed）附带凭据供 Nginx auth_request 校验，避免将密钥发给外部自定义图床。
+    if (config.apiKey?.trim() && imgbedBase.startsWith(window.location.origin)) {
+        headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+    }
+    const resp = await fetch(withLocalProxy(`${imgbedUrl}/upload`), { method: "POST", headers, body: form });
     if (!resp.ok) throw new Error(apiText("arkUploadFailed", { status: resp.status }));
     const json = await resp.json();
     if (!json.url) throw new Error(apiText("arkUploadFailed", { status: 0 }));
 
     // 图床返回的是相对路径 /public/xxx.png，加上图床地址变成完整 URL。
     return /^https?:\/\//i.test(json.url) ? json.url : `${imgbedBase}${json.url}`;
+}
+
+/** 超过 400KB 的参考图先在浏览器压成 JPEG（长边 ≤ 2048px），兼顾所有上游兼容性并大幅减少图床流量。 */
+async function compressReferenceImage(blob: Blob): Promise<Blob> {
+    if (blob.size <= 400 * 1024 || !blob.type.startsWith("image/") || blob.type === "image/gif") return blob;
+    try {
+        const bitmap = await createImageBitmap(blob);
+        try {
+            const maxSide = 2048;
+            const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+            const width = Math.max(1, Math.round(bitmap.width * scale));
+            const height = Math.max(1, Math.round(bitmap.height * scale));
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return blob;
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(bitmap, 0, 0, width, height);
+            const compressed = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+            return compressed && compressed.size < blob.size ? compressed : blob;
+        } finally {
+            bitmap.close();
+        }
+    } catch {
+        return blob;
+    }
 }
 
 function publicReferenceUrl(image: ReferenceImage) {

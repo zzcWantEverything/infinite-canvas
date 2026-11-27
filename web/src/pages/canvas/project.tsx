@@ -936,7 +936,7 @@ function InfiniteCanvasPage() {
             lastCloudPushAtRef.current = Date.now();
             const project = useCanvasStore.getState().openProject(projectId);
             if (project) void pushProjectToCloud(project);
-        }, 1500);
+        }, 3000);
     }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
     useEffect(() => {

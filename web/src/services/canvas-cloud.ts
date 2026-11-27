@@ -107,9 +107,83 @@ export async function awaitCloudUploads(timeoutMs = 8000): Promise<void> {
     ]);
 }
 
+const SIGNED_URL_REFRESH_BUFFER_MS = 15 * 60_000;
+const SIGNED_URL_BATCH_DELAY_MS = 50;
+const SIGNED_URL_BATCH_MAX = 200;
+
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+let pendingBatchKeys = new Set<string>();
+let pendingBatchWaiters: Array<{
+    keys: string[];
+    resolve: (urls: Record<string, string>) => void;
+    reject: (err: unknown) => void;
+}> = [];
+let pendingBatchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function currentUserCachePrefix() {
+    const uid = useUserStore.getState().session?.user?.id;
+    return `${uid ?? 0}:`;
+}
+
+async function flushSignedUrlBatch() {
+    pendingBatchTimer = null;
+    const keys = [...pendingBatchKeys];
+    const waiters = pendingBatchWaiters;
+    pendingBatchKeys = new Set();
+    pendingBatchWaiters = [];
+    if (!keys.length) return;
+
+    const prefix = currentUserCachePrefix();
+    const fetched: Record<string, string> = {};
+    try {
+        for (let i = 0; i < keys.length; i += SIGNED_URL_BATCH_MAX) {
+            const chunk = keys.slice(i, i + SIGNED_URL_BATCH_MAX);
+            const data = await api<{ urls: Record<string, string>; expires_in?: number }>("POST", "/api/canvas/media/urls", { keys: chunk });
+            const ttlMs = Math.max(60, data?.expires_in || 7200) * 1000;
+            const expiresAt = Date.now() + ttlMs;
+            for (const [k, url] of Object.entries(data?.urls || {})) {
+                fetched[k] = url;
+                signedUrlCache.set(prefix + k, { url, expiresAt });
+            }
+        }
+        for (const waiter of waiters) {
+            const out: Record<string, string> = {};
+            for (const k of waiter.keys) {
+                if (fetched[k]) out[k] = fetched[k];
+            }
+            waiter.resolve(out);
+        }
+    } catch (err) {
+        for (const waiter of waiters) waiter.reject(err);
+    }
+}
+
 export async function getCloudMediaUrls(keys: string[]): Promise<Record<string, string>> {
-    const data = await api<{ urls: Record<string, string> }>("POST", "/api/canvas/media/urls", { keys });
-    return data.urls || {};
+    if (!keys.length) return {};
+    const prefix = currentUserCachePrefix();
+    const now = Date.now();
+    const result: Record<string, string> = {};
+    const missing: string[] = [];
+
+    for (const key of keys) {
+        if (!key) continue;
+        const hit = signedUrlCache.get(prefix + key);
+        if (hit && hit.expiresAt - now > SIGNED_URL_REFRESH_BUFFER_MS) {
+            result[key] = hit.url;
+        } else {
+            missing.push(key);
+        }
+    }
+    if (!missing.length) return result;
+
+    const fetched = await new Promise<Record<string, string>>((resolve, reject) => {
+        for (const k of missing) pendingBatchKeys.add(k);
+        pendingBatchWaiters.push({ keys: missing, resolve, reject });
+        if (!pendingBatchTimer) {
+            pendingBatchTimer = setTimeout(() => void flushSignedUrlBatch(), SIGNED_URL_BATCH_DELAY_MS);
+        }
+    });
+    return { ...result, ...fetched };
 }
 
 // ===== 本地 storageKey -> objectKey 映射 =====
@@ -239,19 +313,19 @@ export async function serializeDoc(project: { [key: string]: unknown }): Promise
  * 换设备后靠服务端映射把它们改写成 object_key 并重推，文档从此不再依赖本地映射。
  * 返回是否真的改写了。
  */
-export async function repairCloudProjectMediaKeys(cloudProjectId: string): Promise<boolean> {
-    const project = await getCloudProject(cloudProjectId);
-    if (!project) return false;
+export async function repairCloudProjectMediaKeys(cloudProjectId: string, prefetched?: CloudProject | null): Promise<CloudProject | null> {
+    const project = prefetched ?? (await getCloudProject(cloudProjectId));
+    if (!project) return null;
     let doc: unknown;
     try {
         doc = JSON.parse(project.doc || "{}");
     } catch {
-        return false;
+        return project;
     }
     const all = new Set<string>();
     collectStorageKeys(doc, all);
     const pending = [...all].filter((key) => !key.startsWith("media/") && !key.startsWith("data:"));
-    if (!pending.length) return false;
+    if (!pending.length) return project;
     const remoteKeys = await fetchMediaKeys(pending).catch((): Record<string, string> => ({}));
     // 原浏览器首次修复时，服务端还没登记 local_key（历史数据），本地 cloud_media_map 才是有的那份，优先用它。
     for (const key of pending) {
@@ -259,7 +333,7 @@ export async function repairCloudProjectMediaKeys(cloudProjectId: string): Promi
         const local = await localObjectKeyFor(key);
         if (local) remoteKeys[key] = local;
     }
-    if (!Object.keys(remoteKeys).length) return false;
+    if (!Object.keys(remoteKeys).length) return project;
     let changed = false;
     const rewritten = await rewriteStorageKeys(doc, async (key) => {
         if (key.startsWith("media/") || key.startsWith("data:")) return key;
@@ -270,7 +344,7 @@ export async function repairCloudProjectMediaKeys(cloudProjectId: string): Promi
         }
         return key;
     });
-    if (!changed) return false;
-    await saveCloudProject(cloudProjectId, project.title, JSON.stringify(rewritten), project.revision);
-    return true;
+    if (!changed) return project;
+    const saved = await saveCloudProject(cloudProjectId, project.title, JSON.stringify(rewritten), project.revision);
+    return saved.project || project;
 }

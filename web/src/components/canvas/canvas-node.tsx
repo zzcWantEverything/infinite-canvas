@@ -785,9 +785,9 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
             video.controls = true;
             video.loop = true;
             video.playsInline = true;
-            // 只取元数据展示首帧，不预加载整段视频：一个画布常挂十几个视频，
-            // 云端回放时若不限制，打开画布就会并发拉取全部视频流。
-            video.preload = "metadata";
+            // 本地 blob 零流量直接预载元数据展示首帧；云端签名 URL 一律 preload="none"，
+            // 避免打开含十几个视频的画布时并发向 COS 拉取全部视频头/片段。
+            video.preload = content.startsWith("blob:") ? "metadata" : "none";
             video.className = "h-full w-full rounded-[18px] bg-black object-contain";
             video.dataset.canvasVideo = node.id;
             video.dataset.canvasNoZoom = "";
@@ -795,6 +795,8 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
         }
         // 只在元素确实不在这个容器里时才插入；重复 appendChild 本身就会让浏览器暂停播放。
         if (video.parentElement !== host) host.appendChild(video);
+        const nextPreload = content.startsWith("blob:") ? "metadata" : "none";
+        if (video.preload !== nextPreload) video.preload = nextPreload;
         if (video.getAttribute("src") !== content) video.src = content;
     }, [content, node.id]);
 

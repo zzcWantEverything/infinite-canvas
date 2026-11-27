@@ -2036,7 +2036,7 @@ export default function CopyVideoPage() {
                                         <div key={media.storageKey} className={["overflow-hidden rounded-xl border", active ? "border-stone-400 dark:border-stone-500" : "border-stone-200 dark:border-stone-800"].join(" ")}>
                                             <div className="aspect-video bg-black">
                                                 {mediaHistory.kind === "video" ? (
-                                                    <video src={media.url} controls playsInline className="h-full w-full object-contain" />
+                                                    <video src={media.url} controls playsInline preload={media.url?.startsWith("blob:") ? "metadata" : "none"} className="h-full w-full object-contain" />
                                                 ) : (
                                                     <img src={media.url} alt="" className="h-full w-full cursor-zoom-in object-contain" onClick={() => setPreviewUrl(media.url)} />
                                                 )}

@@ -373,7 +373,7 @@ export function ShotTable(props: ShotTableProps) {
                                     <td className={cellClass}>
                                         {video?.url ? (
                                             <div className="space-y-1.5">
-                                                <video src={video.url} controls playsInline className="w-full rounded-lg bg-black" style={videoAspect} />
+                                                <video src={video.url} controls playsInline preload={video.url?.startsWith("blob:") ? "metadata" : "none"} className="w-full rounded-lg bg-black" style={videoAspect} />
                                                 <div className="flex gap-1.5">
                                                     <Button size="small" className="flex-1" icon={<Sparkles className="size-3.5" />} loading={videoRunning} disabled={disabled} onClick={() => props.onGenerateVideo(shot)}>
                                                         {t("copyVideo.regenerate")}
