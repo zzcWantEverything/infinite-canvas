@@ -34,10 +34,34 @@ export type ModelPickerGroup = {
 
 const DISPLAY_SEPARATOR = " · ";
 const DYNAMIC_PROMO_PATTERN = /^model-\d+$/;
+const PROMO_GROUP_LABEL = "特惠优选";
+const PROMO_GROUP_KEY = `override:${PROMO_GROUP_LABEL}`;
+
+type MutableModelPickerGroup = {
+    key: string;
+    label: string;
+    items: Array<{ value: string; label?: string }>;
+};
 
 /** 分组标题里已经写了「特惠」，条目名再去掉重复的「特惠版」前缀。 */
 function overrideItemLabel(displayName: string) {
     return displayName.replace(/^特惠版\s*/, "").trim() || displayName;
+}
+
+function appendGroupItem(
+    groups: Map<string, MutableModelPickerGroup>,
+    key: string,
+    label: string,
+    item: { value: string; label?: string },
+) {
+    const existing = groups.get(key);
+    if (existing) {
+        if (!existing.items.some((entry) => entry.value === item.value)) {
+            existing.items.push(item);
+        }
+        return;
+    }
+    groups.set(key, { key, label, items: [item] });
 }
 
 /**
@@ -53,58 +77,63 @@ export function splitModelDisplayName(displayName: string) {
 }
 
 /**
- * 按「variant_group 卡片 → 展示名前缀 → 动态特惠归组 → 自身」的优先级把下拉项归组。
- * 顺序沿用入参顺序：第一条出现的项决定该组在列表里的位置。
+ * 按「variant_group 卡片 → 动态特惠归组 → 展示名前缀 → 自身」的优先级把下拉项归组。
+ * 「特惠优选」统一合并并固定置顶；其余分组沿用入参顺序（第一条出现的项决定该组在列表里的位置）。
  */
 export function groupModelOptions(options: ModelPickerOptionMeta[]): ModelPickerGroup[] {
-    const groups = new Map<string, { key: string; label: string; items: Array<{ value: string; label?: string }> }>();
+    const groups = new Map<string, MutableModelPickerGroup>();
 
     for (const option of options) {
         const isExplicitVariantGroup = Boolean(
             option.card && (option.card.variantCount > 1 || option.card.key !== option.name)
         );
         if (isExplicitVariantGroup && option.card) {
-            const key = `card:${option.card.key}`;
+            const cardLabel = option.card.displayName.trim() || option.card.displayName;
+            const isPromoCard = cardLabel === PROMO_GROUP_LABEL;
+            const key = isPromoCard ? PROMO_GROUP_KEY : `card:${option.card.key}`;
             const rawLabel = option.variantDisplayName ?? option.card.displayName ?? option.name;
             const label = option.card.displayName.includes("特惠")
                 ? overrideItemLabel(rawLabel)
                 : rawLabel;
-            const existing = groups.get(key);
-            if (existing) {
-                existing.items.push({ value: option.value, label });
-                continue;
-            }
-            groups.set(key, { key, label: option.card.displayName, items: [{ value: option.value, label }] });
+            appendGroupItem(groups, key, isPromoCard ? PROMO_GROUP_LABEL : option.card.displayName, {
+                value: option.value,
+                label,
+            });
             continue;
         }
 
         const displayName = option.variantDisplayName ?? option.card?.displayName ?? option.name;
         if (DYNAMIC_PROMO_PATTERN.test(option.name) && displayName.includes("特惠")) {
-            const key = "override:特惠优选";
             const label = overrideItemLabel(displayName);
-            const existing = groups.get(key);
-            if (existing) {
-                existing.items.push({ value: option.value, label });
-                continue;
-            }
-            groups.set(key, { key, label: "特惠优选", items: [{ value: option.value, label }] });
+            appendGroupItem(groups, PROMO_GROUP_KEY, PROMO_GROUP_LABEL, {
+                value: option.value,
+                label,
+            });
             continue;
         }
 
         // 单线路卡片的卡片名和线路名是同一串字，去看展示名里有没有「分组 · 线路名」的写法。
         const split = option.card && option.card.variantCount <= 1 ? splitModelDisplayName(option.card.displayName) : null;
-        // 前缀分组单独加前缀，避免和同名的 variant_group 卡片撞车。
-        const key = split ? `prefix:${split.label}` : option.card?.key || option.name;
+        const groupLabel = split ? split.label : option.card?.displayName || option.name;
+        const isPromoGroup = groupLabel.trim() === PROMO_GROUP_LABEL;
+        // 前缀分组单独加前缀，避免和同名的 variant_group 卡片撞车；「特惠优选」统一并入置顶分组。
+        const key = isPromoGroup
+            ? PROMO_GROUP_KEY
+            : split
+              ? `prefix:${split.label}`
+              : option.card?.key || option.name;
         const item = { value: option.value, label: split ? split.rest : (option.variantDisplayName ?? undefined) };
-        const existing = groups.get(key);
-        if (existing) {
-            existing.items.push(item);
-            continue;
-        }
-        groups.set(key, { key, label: split ? split.label : option.card?.displayName || option.name, items: [item] });
+        appendGroupItem(groups, key, isPromoGroup ? PROMO_GROUP_LABEL : groupLabel, item);
     }
 
-    return Array.from(groups.values()).map((group) => {
+    const ordered = Array.from(groups.values());
+    const promoIndex = ordered.findIndex((group) => group.key === PROMO_GROUP_KEY || group.label === PROMO_GROUP_LABEL);
+    if (promoIndex > 0) {
+        const [promoGroup] = ordered.splice(promoIndex, 1);
+        ordered.unshift(promoGroup);
+    }
+
+    return ordered.map((group) => {
         const [first] = group.items;
         // 单条目时，标题写的就是它自己的名字，加标题只是多占一行。
         const header = group.items.length > 1 || (first.label !== undefined && first.label !== group.label);
