@@ -409,7 +409,7 @@ export default {
         segmentVideoLength: "原片 {{seconds}}s",
         segmentEstimate: "约 {{count}} 段",
         segment30Disabled: "原片不超过 15s，无需按 30s 分镜",
-        segmentDurationHint: "不选则自动分镜；选 15s 或 30s 可匹配对应时长的视频模型（再次点击取消）",
+        segmentDurationHint: "默认按 15s 分镜，也可切换 30s 匹配视频模型；再次点击已选项可取消，改为自动分镜",
         remove: "移除视频",
         roles: "角色",
         scenes: "场景",

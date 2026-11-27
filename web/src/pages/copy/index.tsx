@@ -115,7 +115,7 @@ export default function CopyVideoPage() {
     const [file, setFile] = useState<File | null>(null);
     const [videoUrl, setVideoUrl] = useState("");
     const [videoDuration, setVideoDuration] = useState<number | null>(null);
-    const [shotUnitTarget, setShotUnitTarget] = useState<CopyShotUnitTarget | null>(null);
+    const [shotUnitTarget, setShotUnitTarget] = useState<CopyShotUnitTarget | null>(15);
     const [analysis, setAnalysis] = useState<CopyAnalysis | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
     // 只暴露一个百分比进度条：分批/抽帧/转写这些过程对用户没意义。
@@ -303,7 +303,7 @@ export default function CopyVideoPage() {
         setFile(next);
         setVideoUrl(URL.createObjectURL(next));
         setVideoDuration(null);
-        setShotUnitTarget(null);
+        setShotUnitTarget(15);
         setAnalysis(null);
         setError("");
     };
@@ -369,7 +369,7 @@ export default function CopyVideoPage() {
             if (!segments.length && rawTranscript.trim()) segments = spreadTranscript(rawTranscript, meta.duration);
             setAnalysisPercent(15);
             const effectiveTarget: CopyShotUnitTarget | undefined =
-                shotUnitTarget === 30 && meta.duration <= 15 ? undefined : (shotUnitTarget ?? undefined);
+                shotUnitTarget === 30 && meta.duration <= 15 ? 15 : (shotUnitTarget ?? undefined);
             // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格（长片抽 36 帧降低遗漏）。
             setAnalysisStage("overview");
             const overviewFrames = sampleFrames(frames, meta.duration > 60 ? 36 : 24);
@@ -1184,8 +1184,8 @@ export default function CopyVideoPage() {
                 {!analysis ? (
                     <section className="flex flex-col gap-4 rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
                         {videoUrl ? (
-                            <>
-                                <div className="relative overflow-hidden rounded-xl bg-black">
+                            <div className="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,1fr)_280px] lg:grid-cols-[minmax(0,1fr)_320px]">
+                                <div className="relative flex items-center justify-center overflow-hidden rounded-xl bg-black">
                                     <video
                                         src={videoUrl}
                                         controls
@@ -1193,7 +1193,7 @@ export default function CopyVideoPage() {
                                             const duration = event.currentTarget.duration;
                                             if (Number.isFinite(duration) && duration > 0) {
                                                 setVideoDuration(duration);
-                                                setShotUnitTarget((prev) => (prev === 30 && duration <= 15 ? null : prev));
+                                                setShotUnitTarget((prev) => (prev === 30 && duration <= 15 ? 15 : prev));
                                             }
                                         }}
                                         className="max-h-[420px] w-full object-contain"
@@ -1205,7 +1205,7 @@ export default function CopyVideoPage() {
                                             setFile(null);
                                             setVideoUrl("");
                                             setVideoDuration(null);
-                                            setShotUnitTarget(null);
+                                            setShotUnitTarget(15);
                                         }}
                                         className="absolute right-2 top-2 rounded-full bg-black/60 p-1.5 transition hover:bg-black/80"
                                         style={{ color: "#fff" }}
@@ -1214,47 +1214,51 @@ export default function CopyVideoPage() {
                                         <X className="size-4" />
                                     </button>
                                 </div>
-                                <div className="flex flex-col gap-1.5 rounded-xl border border-stone-200/70 bg-stone-50/70 px-3.5 py-2.5 dark:border-stone-800 dark:bg-stone-900/40">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <span className="text-xs font-medium text-stone-700 dark:text-stone-200">{t("copyVideo.segmentDuration")}</span>
+                                <div className="flex flex-col justify-between gap-4 rounded-xl border border-stone-200/70 bg-stone-50/70 p-4 dark:border-stone-800 dark:bg-stone-900/40">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className="text-sm font-semibold text-stone-800 dark:text-stone-100">{t("copyVideo.segmentDuration")}</span>
                                         {videoDuration !== null ? (
-                                            <span className="rounded-md bg-stone-200/70 px-1.5 py-0.5 text-[11px] tabular-nums text-stone-600 dark:bg-stone-800 dark:text-stone-300">
+                                            <span className="rounded-md bg-stone-200/70 px-2 py-0.5 text-[11px] tabular-nums text-stone-600 dark:bg-stone-800 dark:text-stone-300">
                                                 {t("copyVideo.segmentVideoLength", { seconds: videoDuration.toFixed(1) })}
                                             </span>
                                         ) : null}
-                                        <div className="flex items-center gap-2">
-                                            {([15, 30] as const).map((sec) => {
-                                                const active = shotUnitTarget === sec;
-                                                const disabled = analyzing || (sec === 30 && videoDuration !== null && videoDuration <= 15);
-                                                const estimate = videoDuration !== null ? Math.max(1, Math.ceil(videoDuration / sec)) : null;
-                                                return (
-                                                    <button
-                                                        key={sec}
-                                                        type="button"
-                                                        disabled={disabled}
-                                                        title={sec === 30 && videoDuration !== null && videoDuration <= 15 ? t("copyVideo.segment30Disabled") : undefined}
-                                                        onClick={() => setShotUnitTarget((prev) => (prev === sec ? null : sec))}
-                                                        className={[
-                                                            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors",
-                                                            disabled
-                                                                ? "cursor-not-allowed border-stone-200/60 text-stone-300 dark:border-stone-800 dark:text-stone-600"
-                                                                : active
-                                                                  ? "border-amber-500/80 bg-amber-500/15 text-amber-700 dark:border-amber-400/70 dark:text-amber-300"
-                                                                  : "border-stone-200 bg-background text-stone-600 hover:border-stone-400 hover:text-stone-900 dark:border-stone-700 dark:text-stone-300 dark:hover:border-stone-500",
-                                                        ].join(" ")}
-                                                    >
-                                                        <span>{sec}s</span>
-                                                        {estimate !== null && !disabled ? (
-                                                            <span className="text-[10px] opacity-75">· {t("copyVideo.segmentEstimate", { count: estimate })}</span>
-                                                        ) : null}
-                                                    </button>
-                                                );
-                                            })}
-                                        </div>
                                     </div>
-                                    <p className="text-[11px] text-stone-400 dark:text-stone-500">{t("copyVideo.segmentDurationHint")}</p>
+                                    <div className="flex flex-1 flex-col justify-center gap-3">
+                                        {([15, 30] as const).map((sec) => {
+                                            const active = shotUnitTarget === sec;
+                                            const disabled = analyzing || (sec === 30 && videoDuration !== null && videoDuration <= 15);
+                                            const estimate = videoDuration !== null ? Math.max(1, Math.ceil(videoDuration / sec)) : null;
+                                            return (
+                                                <button
+                                                    key={sec}
+                                                    type="button"
+                                                    disabled={disabled}
+                                                    aria-pressed={active}
+                                                    title={sec === 30 && videoDuration !== null && videoDuration <= 15 ? t("copyVideo.segment30Disabled") : undefined}
+                                                    onClick={() => setShotUnitTarget((prev) => (prev === sec ? null : sec))}
+                                                    className={[
+                                                        "flex min-h-[72px] w-full flex-col items-center justify-center gap-1 rounded-xl border px-4 py-3 text-center transition-all",
+                                                        disabled
+                                                            ? "cursor-not-allowed border-stone-200/60 bg-stone-100/50 text-stone-300 dark:border-stone-800 dark:bg-stone-900/30 dark:text-stone-600"
+                                                            : active
+                                                              ? "cursor-pointer border-stone-900 bg-stone-900 text-white shadow-sm dark:border-stone-100 dark:bg-stone-100 dark:text-stone-900"
+                                                              : "cursor-pointer border-stone-200 bg-background text-stone-700 hover:border-stone-400 hover:text-stone-950 dark:border-stone-700 dark:text-stone-200 dark:hover:border-stone-500 dark:hover:text-white",
+                                                    ].join(" ")}
+                                                >
+                                                    <span className="flex items-center gap-1.5 text-lg font-semibold leading-none tracking-tight">
+                                                        {active ? <Check className="size-4" /> : null}
+                                                        <span>{sec}s</span>
+                                                    </span>
+                                                    {estimate !== null && !disabled ? (
+                                                        <span className="text-xs font-normal opacity-75">{t("copyVideo.segmentEstimate", { count: estimate })}</span>
+                                                    ) : null}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                    <p className="text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">{t("copyVideo.segmentDurationHint")}</p>
                                 </div>
-                            </>
+                            </div>
                         ) : (
                             <button
                                 type="button"
@@ -1530,17 +1534,21 @@ export default function CopyVideoPage() {
                                     </span>
                                 </div>
                                 <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200/70 bg-stone-50/60 px-3 py-2 dark:border-stone-800 dark:bg-stone-900/40">
-                                    <div className="flex h-9 items-center gap-1 rounded-lg border border-stone-200/70 bg-background p-1 dark:border-stone-700">
+                                    <div className="flex h-9 items-center gap-1 rounded-lg border border-stone-200/70 bg-background py-1 pl-2.5 pr-1 dark:border-stone-700">
+                                        <span className="shrink-0 text-[11px] text-stone-400 dark:text-stone-500">{t("copyVideo.ratio")}</span>
+                                        <span className="mx-1 h-3.5 w-px bg-stone-200 dark:bg-stone-700" />
                                         {["16:9", "9:16", "1:1"].map((ratio) => (
                                             <button
                                                 key={ratio}
                                                 type="button"
+                                                disabled={batchDisabled}
+                                                aria-pressed={genSettings.videoRatio === ratio}
                                                 onClick={() => patchSettings({ videoRatio: ratio })}
                                                 className={[
-                                                    "flex h-7 items-center rounded-md px-2.5 text-[11px] font-medium transition-colors",
+                                                    "flex h-7 cursor-pointer items-center rounded-md px-2.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60",
                                                     genSettings.videoRatio === ratio
                                                         ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
-                                                        : "text-stone-500 hover:bg-stone-100 dark:text-stone-400 dark:hover:bg-stone-800",
+                                                        : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100",
                                                 ].join(" ")}
                                             >
                                                 {ratio}

@@ -1,3 +1,5 @@
+@layer antd-reset, theme, base, components, utilities;
+@import "antd/dist/reset.css" layer(antd-reset);
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";

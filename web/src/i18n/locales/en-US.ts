@@ -409,7 +409,7 @@ export default {
         segmentVideoLength: "Video {{seconds}}s",
         segmentEstimate: "~{{count}} shots",
         segment30Disabled: "Video is 15s or shorter; 30s split is not needed",
-        segmentDurationHint: "Leave unselected for auto splitting; pick 15s or 30s to match 15s/30s video models (click again to clear)",
+        segmentDurationHint: "Defaults to 15s shots; switch to 30s to match 30s video models, or click the selected option again for auto splitting",
         remove: "Remove video",
         roles: "Characters",
         scenes: "Scenes",
