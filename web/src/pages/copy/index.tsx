@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, Modal, Popconfirm, Progress, type InputRef } from "antd";
+import { App, Button, Checkbox, Input, Modal, Popconfirm, Progress, Select, type InputRef } from "antd";
 import {
     Check,
     ChevronDown,
     Clapperboard,
     Download,
     History,
+    ImageIcon,
     Layers,
     Loader2,
     Map as MapIcon,
@@ -14,11 +15,13 @@ import {
     Pencil,
     Plus,
     Replace,
+    RotateCcw,
     Save,
     Sparkles,
     Trash2,
     Upload,
     User,
+    Video,
     Wand2,
     X,
 } from "lucide-react";
@@ -28,7 +31,26 @@ import { AssetCard } from "@/pages/copy/components/asset-card";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CopyReplaceBar } from "@/pages/copy/components/copy-replace-bar";
 import { ShotTable } from "@/pages/copy/components/shot-table";
-import { CharacterStyleSelect, CopyImageSettingsBar, CopyVideoSettingsBar, createCopyGenSettings, type CopyGenSettings, type ShotOverride } from "@/components/copy/copy-settings-panel";
+import {
+    CharacterStyleSelect,
+    cleanShotOverride,
+    CopyImageSettingsBar,
+    CopyVideoSettingsBar,
+    createCopyGenSettings,
+    hasShotImageOverride,
+    hasShotOverride,
+    normalizeVideoSettingsForModel,
+    resolveEffectiveShotImageParams,
+    resolveEffectiveShotVideoParams,
+    sanitizeShotOverrideForModel,
+    ShotImageParamsPopover,
+    videoModelRatioOptions,
+    videoModelResolutionOptions,
+    videoModelSecondOptions,
+    type CopyGenSettings,
+    type ShotOverride,
+} from "@/components/copy/copy-settings-panel";
+import { ModelPicker } from "@/components/model-picker";
 import type { CopyMedia } from "@/components/copy/types";
 import { characterImagePrompt, characterStyleOf, itemImagePrompt, sceneImagePrompt } from "@/config/character-styles";
 import { videoModelCapability } from "@/config/video-models";
@@ -141,6 +163,8 @@ export default function CopyVideoPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const [shotStatus, setShotStatus] = useState<Record<string, string>>({});
     const [shotOverrides, setShotOverrides] = useState<Record<string, ShotOverride>>({});
+    const [selectedShotIds, setSelectedShotIds] = useState<string[]>([]);
+    const [batchDraft, setBatchDraft] = useState<ShotOverride>({});
     const [batchRunning, setBatchRunning] = useState<BatchKind>("");
     // 当前编辑中的历史记录：分析完自动建一条，之后编辑/生成都更新它。
     const [historyId, setHistoryId] = useState<number | null>(null);
@@ -181,7 +205,12 @@ export default function CopyVideoPage() {
     // 统一参数：一套生图参数喂所有角色/场景/物品，一套生视频参数喂所有分镜。
     const [genSettings, setGenSettings] = useState<CopyGenSettings>(() => createCopyGenSettings(config));
 
-    const patchSettings = (patch: Partial<CopyGenSettings>) => setGenSettings((prev) => ({ ...prev, ...patch }));
+    const patchSettings = (patch: Partial<CopyGenSettings>) =>
+        setGenSettings((prev) => ({
+            ...prev,
+            ...(patch.videoModel !== undefined ? normalizeVideoSettingsForModel(prev, patch.videoModel) : {}),
+            ...patch,
+        }));
 
     // 生成阶段用的配置：把面板里选的模型/比例/分辨率/时长盖到全局配置上，
     // 这样 requestGeneration / createVideoGenerationTask 走的就是面板选择，而不是全局默认。
@@ -223,54 +252,27 @@ export default function CopyVideoPage() {
         return itemImagePrompt({ name: item.name, description: item.description, filmStyle });
     };
 
-    const videoCapability = videoModelCapability(genSettings.videoModel);    const resolutionOptions = useMemo(() => {
-        const tiers = videoCapability?.resolutions?.length ? videoCapability.resolutions : ["480", "720", "1080"];
-        return tiers.map((tier) => ({ value: tier, label: `${tier}P` }));
-    }, [videoCapability]);
-    const secondsOptions = useMemo(() => {
-        const { min, max, step } = videoCapability?.seconds ?? { min: 4, max: 30, step: 1 };
-        const stride = step && step > 0 ? step : 1;
-        const list: { value: string; label: string }[] = [];
-        if (!Number.isFinite(min) || !Number.isFinite(max) || max < min) return [{ value: "5", label: "5s" }];
-        for (let seconds = min; seconds <= max; seconds += stride) list.push({ value: String(seconds), label: `${seconds}s` });
-        return list;
-    }, [videoCapability]);
-
-    /**
-     * 分镜自己的时长 → 模型支持的档位。面板选「按分镜时长」时用这个，
-     * 复刻出来的节奏才和原片一致（统一 5 秒会把快切镜头全拖成慢镜头）。
-     */
-    const shotSeconds = (shot: CopyShot) => {
-        const override = shotOverrides[shot.id]?.seconds;
-        if (override) return override;
-        if (genSettings.videoSeconds !== "auto") return genSettings.videoSeconds;
-        const numeric = Number(String(shot.duration || "").replace(/[^0-9.]/g, ""));
-        let seconds = Number.isFinite(numeric) && numeric > 0 ? numeric : NaN;
-        if (!Number.isFinite(seconds)) {
-            const timecode = (value: string) => {
-                const parts = String(value || "")
-                    .trim()
-                    .split(":")
-                    .map((part) => Number(part));
-                if (parts.length < 2 || parts.some((part) => !Number.isFinite(part))) return NaN;
-                return parts.reduce((acc, part) => acc * 60 + part, 0);
-            };
-            const start = timecode(shot.start);
-            const end = timecode(shot.end);
-            seconds = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : NaN;
-        }
-        if (!Number.isFinite(seconds)) return "5";
-        const { min, max, step } = videoCapability?.seconds ?? { min: 4, max: 30, step: 1 };
-        const stride = step && step > 0 ? step : 1;
-        const snapped = Math.round(seconds / stride) * stride;
-        return String(Math.min(max, Math.max(min, snapped)));
+    const imageConfigForShot = (shot: CopyShot) => {
+        const resolved = resolveEffectiveShotImageParams(genSettings, shotOverrides[shot.id]);
+        return {
+            ...imageConfig,
+            model: resolved.imageModel,
+            imageModel: resolved.imageModel,
+            size: resolved.size,
+        };
     };
 
-    const videoConfigFor = (shot: CopyShot) => ({
-        ...videoConfig,
-        videoSeconds: shotSeconds(shot),
-        vquality: shotOverrides[shot.id]?.resolution || genSettings.videoResolution,
-    });
+    const videoConfigFor = (shot: CopyShot) => {
+        const resolved = resolveEffectiveShotVideoParams(shot, genSettings, shotOverrides[shot.id]);
+        return {
+            ...videoConfig,
+            model: resolved.videoModel,
+            videoModel: resolved.videoModel,
+            size: resolved.videoRatio,
+            vquality: resolved.videoResolution,
+            videoSeconds: resolved.videoSeconds,
+        };
+    };
 
     useEffect(
         () => () => {
@@ -305,6 +307,9 @@ export default function CopyVideoPage() {
         setVideoDuration(null);
         setShotUnitTarget(15);
         setAnalysis(null);
+        setShotOverrides({});
+        setSelectedShotIds([]);
+        setBatchDraft({});
         setError("");
     };
 
@@ -481,6 +486,8 @@ export default function CopyVideoPage() {
             setShotImages({});
             setShotVideos({});
             setShotOverrides({});
+            setSelectedShotIds([]);
+            setBatchDraft({});
             setItemImages({});
             setShotImageHistory({});
             setShotVideoHistory({});
@@ -555,6 +562,7 @@ export default function CopyVideoPage() {
 
     const removeShot = (id: string) => {
         setAnalysis((prev) => (prev ? { ...prev, shots: prev.shots.filter((shot) => shot.id !== id) } : prev));
+        setSelectedShotIds((prev) => prev.filter((item) => item !== id));
     };
 
     const addShot = () => {
@@ -602,7 +610,45 @@ export default function CopyVideoPage() {
         });
     };
 
-    const patchOverride = (id: string, patch: ShotOverride) => setShotOverrides((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+    const patchOverride = (id: string, patch: ShotOverride) =>
+        setShotOverrides((prev) => {
+            const merged: ShotOverride = { ...prev[id], ...patch };
+            const effectiveVideoModel = merged.videoModel || genSettings.videoModel;
+            const cleaned = sanitizeShotOverrideForModel(merged, effectiveVideoModel);
+            if (!cleaned) {
+                if (!(id in prev)) return prev;
+                const next = { ...prev };
+                delete next[id];
+                return next;
+            }
+            return { ...prev, [id]: cleaned };
+        });
+
+    const resetShotOverride = (id: string) =>
+        setShotOverrides((prev) => {
+            if (!(id in prev)) return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+        });
+
+    const resetOverridesForIds = (ids: string[]) => {
+        if (!ids.length) return;
+        const targetSet = new Set(ids);
+        setShotOverrides((prev) => {
+            const next: Record<string, ShotOverride> = {};
+            for (const [key, value] of Object.entries(prev)) {
+                if (!targetSet.has(key)) next[key] = value;
+            }
+            return next;
+        });
+        message.success(t("copyVideo.batchOverrideReset", { count: ids.length }));
+    };
+
+    const resetAllOverrides = () => {
+        setShotOverrides({});
+        if (analysis?.shots.length) message.success(t("copyVideo.batchOverrideReset", { count: analysis.shots.length }));
+    };
 
     // 自己上传参考图：覆盖 AI 生成的那张，后续生视频会用它当参考。
     const pickItemImage = (id: string) => {
@@ -635,16 +681,19 @@ export default function CopyVideoPage() {
         storageKey: media.storageKey || undefined,
     });
 
-    const maxVideoRefs = useMemo(() => {
-        if (videoCapability?.maxImages && videoCapability.maxImages > 0) return Math.min(videoCapability.maxImages, 9);
-        return resolveModelRequestConfig(videoConfig, genSettings.videoModel).apiFormat === "gemini" ? 4 : 1;
-    }, [videoCapability, videoConfig, genSettings.videoModel]);
-
     /**
      * 单一真源：统一算出本分镜「绑定资产 + 实际上传参考图 + 1-based 图片N 映射」。
      * 生视频、UI 状态徽标与复制描述词都共用它，保证提示词编号与上传参考图顺序 100% 一致。
      */
     const resolveShotVideoRefs = (shot: CopyShot): { refs: ReferenceImage[]; bindings: ShotReferenceBinding[]; boundAssets: CopyResolvedAsset[] } => {
+        const effectiveModel = shotOverrides[shot.id]?.videoModel || genSettings.videoModel;
+        const cap = videoModelCapability(effectiveModel);
+        const shotMaxRefs =
+            cap?.maxImages && cap.maxImages > 0
+                ? Math.min(cap.maxImages, 9)
+                : resolveModelRequestConfig({ ...config, model: effectiveModel, videoModel: effectiveModel }, effectiveModel).apiFormat === "gemini"
+                  ? 4
+                  : 1;
         const boundAssets = analysis ? resolveShotBoundAssets(shot, analysis) : [];
         const entries: Array<{ ref: ReferenceImage; kind: ShotReferenceBinding["kind"]; id: string; name: string }> = [];
         const frame = shotImages[shot.id];
@@ -678,7 +727,7 @@ export default function CopyVideoPage() {
             appendFallback(analysis.roles, "role");
             appendFallback(analysis.scenes, "scene");
         }
-        const limited = entries.slice(0, maxVideoRefs);
+        const limited = entries.slice(0, shotMaxRefs);
         return {
             refs: limited.map((entry) => entry.ref),
             bindings: limited.map((entry, idx) => ({
@@ -732,7 +781,7 @@ export default function CopyVideoPage() {
     const runShotImage = async (shot: CopyShot) => {
         setShotImageStatus((prev) => ({ ...prev, [shot.id]: "running" }));
         try {
-            const dataUrl = await generateShotImage(imageConfig, shot, imageRefsForShot(shot), analysis?.style || "");
+            const dataUrl = await generateShotImage(imageConfigForShot(shot), shot, imageRefsForShot(shot), analysis?.style || "");
             const media = await uploadMediaFile(dataUrl, "image");
             const entry = { url: media.url, storageKey: media.storageKey };
             setShotImages((prev) => ({ ...prev, [shot.id]: entry }));
@@ -772,8 +821,8 @@ export default function CopyVideoPage() {
         }
     };
 
-    // 批量生成：角色/场景/物品图、分镜图、分镜视频
-    const runBatch = async (kind: "asset-image" | "shot-image" | "shot-video") => {
+    // 批量生成：角色/场景/物品图、全量/已选分镜图、全量/已选分镜视频
+    const runBatch = async (kind: "asset-image" | "shot-image" | "shot-video", targetShotIds?: string[]) => {
         if (!analysis || batchRunning) return;
         setBatchRunning(kind);
         try {
@@ -784,8 +833,12 @@ export default function CopyVideoPage() {
                     ...analysis.items.map((item) => ({ item, section: "items" as Section })),
                 ];
                 await runQueue(assets, (asset) => runItemImage(asset.item, asset.section), 2);
-            } else if (kind === "shot-image") await runQueue(analysis.shots, runShotImage, 2);
-            else await runQueue(analysis.shots, runShotVideo, 2);
+            } else {
+                const idSet = targetShotIds?.length ? new Set(targetShotIds) : null;
+                const targetShots = idSet ? analysis.shots.filter((shot) => idSet.has(shot.id)) : analysis.shots;
+                if (kind === "shot-image") await runQueue(targetShots, runShotImage, 2);
+                else await runQueue(targetShots, runShotVideo, 2);
+            }
         } finally {
             setBatchRunning("");
         }
@@ -958,7 +1011,11 @@ export default function CopyVideoPage() {
             setAnalysis(normalized);
             setReplaceUndo(null);
             setSourceMeta(doc.source ?? null);
-            if (doc.settings) setGenSettings({ ...createCopyGenSettings(config), ...doc.settings });
+            if (doc.settings) {
+                const defaults = createCopyGenSettings(config);
+                const legacyImage = !doc.settings.imageModel || /(^|::)gpt-image-2$/i.test(doc.settings.imageModel);
+                setGenSettings({ ...defaults, ...doc.settings, ...(legacyImage ? { imageModel: defaults.imageModel } : {}) });
+            }
             const remapMedia = async (map?: Record<string, CopyMedia>) => {
                 const moved: Record<string, CopyMedia> = {};
                 const resolved = await resolveMediaMap(map);
@@ -992,6 +1049,8 @@ export default function CopyVideoPage() {
             setShotImageHistory(imageHistory);
             setStoryboards(await remapMedia(doc.storyboards));
             setShotOverrides(doc.shotOverrides ?? {});
+            setSelectedShotIds([]);
+            setBatchDraft({});
             setItemStatus({});
             setShotStatus({});
             setShotImageStatus({});
@@ -1088,6 +1147,52 @@ export default function CopyVideoPage() {
     const focusReplaceBar = () => {
         replaceBarRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
         window.setTimeout(() => replaceInputRef.current?.focus(), 220);
+    };
+
+    const validSelectedIds = useMemo(() => {
+        if (!analysis) return [];
+        const shotIdSet = new Set(analysis.shots.map((shot) => shot.id));
+        return selectedShotIds.filter((id) => shotIdSet.has(id));
+    }, [analysis, selectedShotIds]);
+    const allShotsSelected = Boolean(analysis && analysis.shots.length && validSelectedIds.length === analysis.shots.length);
+    const someShotsSelected = validSelectedIds.length > 0 && validSelectedIds.length < (analysis?.shots.length ?? 0);
+    const customOverrideCount = useMemo(
+        () => (analysis ? analysis.shots.filter((shot) => hasShotOverride(shotOverrides[shot.id])).length : 0),
+        [analysis, shotOverrides],
+    );
+    const batchEffectiveVideoModel = batchDraft.videoModel || genSettings.videoModel;
+
+    const toggleSelectShot = (id: string) =>
+        setSelectedShotIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+
+    const toggleSelectAllShots = () => {
+        if (!analysis) return;
+        setSelectedShotIds(allShotsSelected ? [] : analysis.shots.map((shot) => shot.id));
+    };
+
+    const patchBatchDraft = (patch: ShotOverride) =>
+        setBatchDraft((prev) => {
+            const merged: ShotOverride = { ...prev, ...patch };
+            const effectiveModel = merged.videoModel || genSettings.videoModel;
+            return sanitizeShotOverrideForModel(merged, effectiveModel) ?? {};
+        });
+
+    const applyBatchOverride = () => {
+        const draftPatch = cleanShotOverride(batchDraft);
+        if (!validSelectedIds.length || !draftPatch) return;
+        setShotOverrides((prev) => {
+            const next = { ...prev };
+            for (const id of validSelectedIds) {
+                const merged: ShotOverride = { ...next[id], ...draftPatch };
+                const effectiveModel = merged.videoModel || genSettings.videoModel;
+                const cleaned = sanitizeShotOverrideForModel(merged, effectiveModel);
+                if (cleaned) next[id] = cleaned;
+                else delete next[id];
+            }
+            return next;
+        });
+        setBatchDraft({});
+        message.success(t("copyVideo.batchOverrideApplied", { count: validSelectedIds.length }));
     };
 
     const gridClass = "grid grid-cols-3 gap-2.5 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8";
@@ -1524,16 +1629,40 @@ export default function CopyVideoPage() {
                         <section className="rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
                             <div className="mb-3">
                                 <div className="flex flex-wrap items-center justify-between gap-3">
-                                    <h2 className="flex items-center gap-2 text-base font-semibold text-stone-900 dark:text-stone-100">
-                                        <Clapperboard className="size-4 text-stone-400" />
-                                        {t("copyVideo.shots")}
-                                        <span className="text-xs font-normal text-stone-400 dark:text-stone-500">{t("copyVideo.shotCount", { count: analysis.shots.length })}</span>
-                                    </h2>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <h2 className="flex items-center gap-2 text-base font-semibold text-stone-900 dark:text-stone-100">
+                                            <Clapperboard className="size-4 text-stone-400" />
+                                            {t("copyVideo.shots")}
+                                            <span className="text-xs font-normal text-stone-400 dark:text-stone-500">{t("copyVideo.shotCount", { count: analysis.shots.length })}</span>
+                                        </h2>
+                                        {customOverrideCount > 0 ? (
+                                            <span className="flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                                                {t("copyVideo.customOverrideCount", { count: customOverrideCount })}
+                                                <button
+                                                    type="button"
+                                                    disabled={batchDisabled}
+                                                    onClick={resetAllOverrides}
+                                                    className="ml-1 cursor-pointer underline underline-offset-2 opacity-80 hover:opacity-100 disabled:cursor-not-allowed"
+                                                >
+                                                    {t("copyVideo.resetAllOverrides")}
+                                                </button>
+                                            </span>
+                                        ) : null}
+                                    </div>
                                     <span className="rounded-full border border-stone-200 px-2 py-1 text-[10px] text-stone-500 dark:border-stone-700 dark:text-stone-400">
                                         {t("copyVideo.modeTag")}
                                     </span>
                                 </div>
                                 <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200/70 bg-stone-50/60 px-3 py-2 dark:border-stone-800 dark:bg-stone-900/40">
+                                    <Checkbox
+                                        checked={allShotsSelected}
+                                        indeterminate={someShotsSelected}
+                                        disabled={batchDisabled || !analysis.shots.length}
+                                        onChange={toggleSelectAllShots}
+                                    >
+                                        <span className="text-xs text-stone-600 dark:text-stone-300">{t("copyVideo.selectAll")}</span>
+                                    </Checkbox>
+                                    <span className="mx-0.5 h-4 w-px bg-stone-200 dark:bg-stone-700" />
                                     <div className="flex h-9 items-center gap-1 rounded-lg border border-stone-200/70 bg-background py-1 pl-2.5 pr-1 dark:border-stone-700">
                                         <span className="shrink-0 text-[11px] text-stone-400 dark:text-stone-500">{t("copyVideo.ratio")}</span>
                                         <span className="mx-1 h-3.5 w-px bg-stone-200 dark:bg-stone-700" />
@@ -1570,6 +1699,15 @@ export default function CopyVideoPage() {
                                     >
                                         {t("copyVideo.genShotImages")}
                                     </Button>
+                                    <ShotImageParamsPopover
+                                        config={config}
+                                        allowDefault={false}
+                                        value={{ imageModel: genSettings.imageModel, imageRatio: genSettings.imageRatio, imageScale: genSettings.imageScale }}
+                                        title={t("copyVideo.defaultImageParamsTitle")}
+                                        triggerLabel={t("copyVideo.shotImageParams")}
+                                        disabled={batchDisabled}
+                                        onChange={(patch) => patchSettings(patch)}
+                                    />
                                     <div className="ml-auto flex flex-wrap items-center gap-2">
                                         <CopyVideoSettingsBar config={config} value={genSettings} onChange={patchSettings} disabled={batchDisabled} />
                                         <Button size="small" icon={<Plus className="size-3.5" />} disabled={batchDisabled} onClick={addShot}>
@@ -1583,9 +1721,125 @@ export default function CopyVideoPage() {
                                         </Button>
                                     </div>
                                 </div>
+                                {validSelectedIds.length > 0 ? (
+                                    <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-xl border border-amber-300/70 bg-amber-50/60 px-3 py-2 dark:border-amber-500/35 dark:bg-amber-950/25">
+                                        <span className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                                            {t("copyVideo.selectedShotsCount", { count: validSelectedIds.length, total: analysis.shots.length })}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            disabled={batchDisabled}
+                                            onClick={() => setSelectedShotIds([])}
+                                            className="cursor-pointer text-[11px] text-stone-500 underline-offset-2 hover:text-stone-900 hover:underline disabled:cursor-not-allowed dark:text-stone-400 dark:hover:text-stone-100"
+                                        >
+                                            {t("copyVideo.clearSelection")}
+                                        </button>
+                                        <span className="mx-0.5 h-4 w-px bg-amber-300/60 dark:bg-amber-500/30" />
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            <ModelPicker
+                                                config={config}
+                                                capability="video"
+                                                allowDefault
+                                                defaultLabel={t("copyVideo.batchKeepVideoModel")}
+                                                value={batchDraft.videoModel || ""}
+                                                disabled={batchDisabled}
+                                                onChange={(model) => patchBatchDraft({ videoModel: model || undefined })}
+                                                className="!h-7 !min-w-[144px] !max-w-[210px] !rounded-md !bg-background !px-2 !text-xs"
+                                            />
+                                            <Select
+                                                size="small"
+                                                className="!w-[88px]"
+                                                value={batchDraft.videoRatio || undefined}
+                                                placeholder={t("copyVideo.ratioDefault")}
+                                                disabled={batchDisabled}
+                                                allowClear
+                                                options={videoModelRatioOptions(batchEffectiveVideoModel)}
+                                                onChange={(value) => patchBatchDraft({ videoRatio: value || undefined })}
+                                                popupMatchSelectWidth={false}
+                                            />
+                                            <Select
+                                                size="small"
+                                                className="!w-[96px]"
+                                                value={batchDraft.resolution || undefined}
+                                                placeholder={t("copyVideo.resolutionDefault")}
+                                                disabled={batchDisabled}
+                                                allowClear
+                                                options={videoModelResolutionOptions(batchEffectiveVideoModel)}
+                                                onChange={(value) => patchBatchDraft({ resolution: value || undefined })}
+                                                popupMatchSelectWidth={false}
+                                            />
+                                            <Select
+                                                size="small"
+                                                className="!w-[100px]"
+                                                value={batchDraft.seconds || undefined}
+                                                placeholder={t("copyVideo.secondsDefault")}
+                                                disabled={batchDisabled}
+                                                allowClear
+                                                options={videoModelSecondOptions(batchEffectiveVideoModel, t("copyVideo.secondsAuto"), true)}
+                                                onChange={(value) => patchBatchDraft({ seconds: value || undefined })}
+                                                popupMatchSelectWidth={false}
+                                            />
+                                            <ShotImageParamsPopover
+                                                config={config}
+                                                allowDefault
+                                                value={{ imageModel: batchDraft.imageModel, imageRatio: batchDraft.imageRatio, imageScale: batchDraft.imageScale }}
+                                                defaults={{ imageModel: genSettings.imageModel, imageRatio: genSettings.imageRatio, imageScale: genSettings.imageScale }}
+                                                title={t("copyVideo.batchImageParamsTitle")}
+                                                triggerLabel={t("copyVideo.shotImageParams")}
+                                                active={hasShotImageOverride(batchDraft)}
+                                                disabled={batchDisabled}
+                                                onChange={(patch) => patchBatchDraft(patch)}
+                                                onReset={
+                                                    hasShotImageOverride(batchDraft)
+                                                        ? () => patchBatchDraft({ imageModel: undefined, imageRatio: undefined, imageScale: undefined })
+                                                        : undefined
+                                                }
+                                            />
+                                        </div>
+                                        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                                            <Button
+                                                type="primary"
+                                                size="small"
+                                                icon={<Check className="size-3.5" />}
+                                                disabled={batchDisabled || !hasShotOverride(batchDraft)}
+                                                onClick={applyBatchOverride}
+                                            >
+                                                {t("copyVideo.applyToSelected", { count: validSelectedIds.length })}
+                                            </Button>
+                                            <Button
+                                                size="small"
+                                                icon={<RotateCcw className="size-3" />}
+                                                disabled={batchDisabled}
+                                                onClick={() => resetOverridesForIds(validSelectedIds)}
+                                            >
+                                                {t("copyVideo.resetDefault")}
+                                            </Button>
+                                            <Button
+                                                size="small"
+                                                icon={<ImageIcon className="size-3.5" />}
+                                                loading={batchRunning === "shot-image"}
+                                                disabled={batchDisabled}
+                                                onClick={() => void runBatch("shot-image", validSelectedIds)}
+                                            >
+                                                {t("copyVideo.genSelectedImages", { count: validSelectedIds.length })}
+                                            </Button>
+                                            <Button
+                                                size="small"
+                                                icon={<Video className="size-3.5" />}
+                                                loading={batchRunning === "shot-video"}
+                                                disabled={batchDisabled}
+                                                onClick={() => void runBatch("shot-video", validSelectedIds)}
+                                            >
+                                                {t("copyVideo.genSelectedVideos", { count: validSelectedIds.length })}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                ) : null}
                             </div>
 
                             <ShotTable
+                                config={config}
+                                genSettings={genSettings}
                                 shots={analysis.shots}
                                 roles={analysis.roles}
                                 scenes={analysis.scenes}
@@ -1594,6 +1848,7 @@ export default function CopyVideoPage() {
                                 itemStatus={itemStatus}
                                 imageRatio={genSettings.imageRatio}
                                 disabled={batchDisabled}
+                                selectedIds={validSelectedIds}
                                 storyboards={storyboards}
                                 shotImages={shotImages}
                                 shotVideos={shotVideos}
@@ -1602,8 +1857,6 @@ export default function CopyVideoPage() {
                                 imageStatus={shotImageStatus}
                                 videoStatus={shotStatus}
                                 overrides={shotOverrides}
-                                resolutionOptions={resolutionOptions}
-                                secondsOptions={secondsOptions}
                                 resolveVideoRefs={resolveShotVideoRefs}
                                 getCopyPrompt={(shot) =>
                                     shotPrompt(shot, analysis.style || "", {
@@ -1612,8 +1865,10 @@ export default function CopyVideoPage() {
                                         referenceBindings: resolveShotVideoRefs(shot).bindings,
                                     })
                                 }
+                                onToggleSelect={toggleSelectShot}
                                 onUpdate={updateShot}
                                 onOverride={patchOverride}
+                                onResetOverride={resetShotOverride}
                                 onRemove={removeShot}
                                 onMove={moveShot}
                                 onEdit={setShotDraft}

@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { encodeChannelModel, guessCapability, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { encodeChannelModel, guessCapability, modelOptionLabel, modelOptionName, normalizedBaseUrlMatch, pickPreferredImageModelOption, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
@@ -15,6 +15,35 @@ import { groupModelOptions } from "@/lib/model-picker-groups";
 import { estimateModelPrice } from "@/lib/model-price";
 import { videoModelCapability, videoModelDefaultResolution } from "@/config/video-models";
 
+const USER_MODELS_TTL = 60_000;
+const DEFAULT_MODEL_VALUE = "__default__";
+
+let cachedModelsKey = "";
+let cachedModels: string[] | null = null;
+let cachedModelsAt = 0;
+let inflightModels: { key: string; promise: Promise<string[]> } | null = null;
+
+async function loadCachedUserModels(baseUrl: string, token: string): Promise<string[]> {
+    const key = `${baseUrl.trim().replace(/\/+$/, "")}::${token}`;
+    const now = Date.now();
+    if (cachedModels && cachedModelsKey === key && now - cachedModelsAt < USER_MODELS_TTL) return cachedModels;
+    if (inflightModels && inflightModels.key === key) return inflightModels.promise;
+    const promise = fetchUserModels(baseUrl, token)
+        .then((models) => {
+            if (models.length) {
+                cachedModelsKey = key;
+                cachedModels = models;
+                cachedModelsAt = Date.now();
+            }
+            return models;
+        })
+        .finally(() => {
+            if (inflightModels?.promise === promise) inflightModels = null;
+        });
+    inflightModels = { key, promise };
+    return promise;
+}
+
 type ModelPickerProps = {
     config: AiConfig;
     value?: string;
@@ -23,10 +52,14 @@ type ModelPickerProps = {
     className?: string;
     fullWidth?: boolean;
     placeholder?: string;
+    allowDefault?: boolean;
+    defaultLabel?: string;
+    disabled?: boolean;
+    onMenuOpenChange?: (open: boolean) => void;
     onMissingConfig?: () => void;
 };
 
-export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, onMissingConfig }: ModelPickerProps) {
+export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, allowDefault = false, defaultLabel, disabled = false, onMenuOpenChange, onMissingConfig }: ModelPickerProps) {
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
@@ -43,7 +76,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         if (!capability || !live?.baseUrl || !live?.token) return;
         const matchingChannel = config.channels.find((ch) => normalizedBaseUrlMatch(ch.baseUrl, live.baseUrl)) ?? config.channels[0];
         const channelId = matchingChannel?.id ?? "default";
-        fetchUserModels(live.baseUrl, live.token)
+        loadCachedUserModels(live.baseUrl, live.token)
             .then((models) => {
                 if (!models.length) return;
                 setServerModels(models.map((m) => encodeChannelModel(channelId, m)));
@@ -143,32 +176,46 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
 
     // 节点上残留的模型名不在服务端列表里（例如已下架的 ark 模型）时，自动纠正为列表首个可用模型。
     // 否则界面显示为空，但节点里仍存着旧模型名，用户不重新选就会把已下线的模型提交出去。
+    // 若允许「跟随默认」（allowDefault），未选择时保持空值，仅当已选的自定义模型下线时清空回默认。
     useEffect(() => {
-        if (!usingServerOptions || current || !options.length) return;
-        onChange(options[0]);
+        if (!usingServerOptions || !options.length) return;
+        if (allowDefault) {
+            if (value && !current) onChange("");
+            return;
+        }
+        if (current) return;
+        const fallback = capability === "image" ? pickPreferredImageModelOption(options) : "";
+        onChange(fallback || options[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [usingServerOptions, current, options]);
+    }, [usingServerOptions, current, options, allowDefault, value, capability]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
+    const defaultText = defaultLabel || pickerPlaceholder;
+    const triggerText = current ? modelOptionLabel(config, current) : allowDefault && defaultLabel ? defaultLabel : pickerPlaceholder;
 
     useEffect(() => {
         const closeOtherPicker = (event: Event) => {
-            if ((event as CustomEvent<string>).detail !== pickerId) setOpen(false);
+            if ((event as CustomEvent<string>).detail !== pickerId) {
+                setOpen(false);
+                onMenuOpenChange?.(false);
+            }
         };
         window.addEventListener("model-picker-open", closeOtherPicker);
         return () => window.removeEventListener("model-picker-open", closeOtherPicker);
-    }, [pickerId]);
+    }, [pickerId, onMenuOpenChange]);
 
     return (
         <Select
+            disabled={disabled}
             open={open}
-            value={current}
+            value={allowDefault ? current || DEFAULT_MODEL_VALUE : current}
             onOpenChange={(nextOpen) => {
                 // 视频能力：服务器已提供模型列表时不触发配置弹窗；其他能力保留原逻辑。
                 if (nextOpen && !options.length && config.channelMode === "local" && capability !== "video") onMissingConfig?.();
                 if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                 setOpen(nextOpen);
+                onMenuOpenChange?.(nextOpen);
             }}
-            onValueChange={onChange}
+            onValueChange={(next) => onChange(allowDefault && next === DEFAULT_MODEL_VALUE ? "" : next)}
         >
             <SelectTrigger
                 className={cn(
@@ -179,10 +226,10 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 )}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
-                title={current ? modelOptionLabel(config, current) : pickerPlaceholder}
+                title={triggerText}
             >
-                <ModelIcon model={current} />
-                <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{current ? modelOptionLabel(config, current) : pickerPlaceholder}</span>
+                {allowDefault && !current ? <Cpu className="size-3.5 shrink-0 opacity-50" /> : <ModelIcon model={current} />}
+                <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{triggerText}</span>
             </SelectTrigger>
             <SelectContent
                 data-canvas-no-zoom
@@ -194,6 +241,11 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 onPointerDown={(event) => event.stopPropagation()}
                 onMouseDown={(event) => event.stopPropagation()}
             >
+                {allowDefault ? (
+                    <SelectItem value={DEFAULT_MODEL_VALUE} textValue={defaultText} className="mb-1 border-b border-border/60 pb-1.5 text-muted-foreground">
+                        {defaultText}
+                    </SelectItem>
+                ) : null}
                 {optionGroups.length ? (
                     optionGroups.map((group) => {
                         if (!group.header) {

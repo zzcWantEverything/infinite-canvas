@@ -130,7 +130,7 @@ export const defaultConfig: AiConfig = {
             apiKey: "",
             apiFormat: "openai",
             models: [
-                { name: "gpt-image-2", capability: "image" },
+                { name: "tt-image-2", capability: "image" },
                 { name: "grok-imagine-video", capability: "video" },
                 { name: "gpt-5.5", capability: "text" },
                 { name: "gpt-4o-mini-tts", capability: "audio" },
@@ -138,7 +138,7 @@ export const defaultConfig: AiConfig = {
         },
     ],
     model: "default::model-359263564038410254",
-    imageModel: "default::gpt-image-2",
+    imageModel: "default::tt-image-2",
     videoModel: "default::qr-v007",
     textModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
@@ -153,7 +153,7 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
+    models: ["default::tt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
     quality: "auto",
     size: "16:9",
     background: "",
@@ -264,6 +264,17 @@ export function selectableModelsByCapability(config: AiConfig, capability?: Mode
     return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
 }
 
+/** 默认生图模型优先级：优先 GPT 系 image-2（tt-image-2），其次 Image 2.6（tt-image-2.6），再退回其他有效 tt-image / gpt-image（排除已下线的 gpt-image-2）。 */
+export function pickPreferredImageModelOption(options: string[]): string {
+    return (
+        options.find((model) => /(^|::)tt-image-2$/i.test(model)) ||
+        options.find((model) => /(^|::)tt-image-2\.6$/i.test(model)) ||
+        options.find((model) => /(^|::)tt-image/i.test(model)) ||
+        options.find((model) => /(^|::)gpt-image(?!-2$)/i.test(model)) ||
+        ""
+    );
+}
+
 /** The user script (if any) attached to a model; empty string means use the system default call. */
 export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
@@ -320,7 +331,7 @@ export const useConfigStore = create<ConfigStore>()(
             name: CONFIG_STORE_KEY,
             // v1：图片默认比例从 1:1 改成 16:9。只把仍是旧默认值的配置升上来，
             // 用户自己选过 1:1 的话能在 v0→v1 之后保持不变（迁移只跑一次）。
-            version: 2,
+            version: 3,
             migrate: (persisted, oldVersion) => {
                 const state = persisted as { config?: Partial<AiConfig> } | undefined;
                 if (!state?.config) return state;
@@ -329,6 +340,26 @@ export const useConfigStore = create<ConfigStore>()(
                 if (oldVersion < 1 && config.size === "1:1") config = { ...config, size: "16:9" };
                 // v1 → v2：图片默认张数 3 → 1（只改老默认值，用户选过的不动）
                 if (oldVersion < 2 && config.canvasImageCount === "3") config = { ...config, canvasImageCount: "1" };
+                // v2 → v3：gpt-image-2 已下线，迁到 GPT 系 image-2（tt-image-2）；曾因旧默认值落到 banana-2.1 的也一并迁回。
+                if (oldVersion < 3) {
+                    if (Array.isArray(config.channels)) {
+                        config = {
+                            ...config,
+                            channels: config.channels.map((channel) => ({
+                                ...channel,
+                                models: Array.isArray(channel.models)
+                                    ? channel.models.map((item) => (item && item.name === "gpt-image-2" ? { ...item, name: "tt-image-2" } : item))
+                                    : channel.models,
+                            })),
+                        };
+                    }
+                    if (!config.imageModel || /(^|::)(gpt-image-2|banana-2\.1)$/i.test(config.imageModel)) {
+                        const prefix = config.imageModel && config.imageModel.includes("::")
+                            ? config.imageModel.slice(0, config.imageModel.indexOf("::"))
+                            : config.channels?.[0]?.id || "default";
+                        config = { ...config, imageModel: encodeChannelModel(prefix, "tt-image-2") };
+                    }
+                }
                 return { ...state, config };
             },
             partialize: (state) => ({ config: state.config, webdav: state.webdav }),
@@ -355,7 +386,7 @@ export const useConfigStore = create<ConfigStore>()(
                         apiFormat: normalizeApiFormat(config.apiFormat),
                         channels,
                         models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
+                        imageModel: normalizeModelOptionValue(config.imageModel || defaultConfig.imageModel, channels) || defaultConfig.imageModel,
                         videoModel: normalizeModelOptionValue(config.videoModel, channels),
                         textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
                         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
@@ -529,7 +560,9 @@ export function normalizeModelOptionValue(value: string | undefined, channels: M
     const decoded = decodeChannelModel(model);
     if (decoded) {
         const channel = channels.find((item) => item.id === decoded.channelId);
-        return channel && channel.models.some((item) => item.name === decoded.model) ? model : "";
+        // 服务端目录模型（如 tt-image-2 / banana-pro / qr-v007 等）未必登记在本地 channel.models；
+        // 只要渠道存在就保留原值，避免页面刷新后在 merge 阶段被清空并退回列表首项（纳米香蕉 2.1）。
+        return channel ? model : "";
     }
     const channel = channels.find((item) => item.models.some((entry) => entry.name === model)) || channels[0];
     return channel && channel.models.some((item) => item.name === model) ? encodeChannelModel(channel.id, model) : model;
