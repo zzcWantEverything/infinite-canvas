@@ -36,6 +36,8 @@ export type SystemStatus = {
     register_enabled?: boolean;
     password_register_enabled?: boolean;
     email_verification?: boolean;
+    turnstile_check?: boolean;
+    turnstile_site_key?: string;
 };
 
 function authApiUrl(baseUrl: string, path: string) {
@@ -88,18 +90,19 @@ export async function fetchStatus(baseUrl: string): Promise<SystemStatus> {
     return (res.data.data ?? res.data) as SystemStatus;
 }
 
-export async function sendVerificationCode(baseUrl: string, email: string): Promise<void> {
+export async function sendVerificationCode(baseUrl: string, email: string, turnstile?: string): Promise<void> {
     const res = await axios.get<{ success: boolean; message?: string }>(
         authApiUrl(baseUrl, "/api/verification"),
-        { params: { email } },
+        { params: turnstile ? { email, turnstile } : { email } },
     );
     if (!res.data.success) throw new Error(res.data.message || "发送失败");
 }
 
-export async function loginWithPassword(baseUrl: string, username: string, password: string): Promise<LoginResult> {
+export async function loginWithPassword(baseUrl: string, username: string, password: string, turnstile?: string): Promise<LoginResult> {
     const res = await axios.post<Record<string, unknown>>(
         authApiUrl(baseUrl, "/api/user/login"),
         { username, password },
+        turnstile ? { params: { turnstile } } : undefined,
     );
     if (!res.data.success) throw new Error((res.data.message as string) || "登录失败");
     return extractTokenAndUser(res.data, baseUrl);
@@ -107,11 +110,12 @@ export async function loginWithPassword(baseUrl: string, username: string, passw
 
 export async function registerUser(
     baseUrl: string,
-    params: { username: string; password: string; email?: string; verification_code?: string },
+    params: { username: string; password: string; email?: string; verification_code?: string; turnstile?: string },
 ): Promise<void> {
     const res = await axios.post<{ success: boolean; message?: string }>(
         authApiUrl(baseUrl, "/api/user/register"),
         { username: params.username, password: params.password, password2: params.password, email: params.email, verification_code: params.verification_code },
+        params.turnstile ? { params: { turnstile: params.turnstile } } : undefined,
     );
     if (!res.data.success) throw new Error(res.data.message || "注册失败");
 }

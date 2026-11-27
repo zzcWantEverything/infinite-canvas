@@ -16,6 +16,36 @@ function getEffectiveBaseUrl() {
 type LoginValues = { username: string; password: string };
 type RegisterValues = { username: string; password: string; confirmPassword: string; email?: string; verificationCode?: string };
 
+type TurnstileApi = {
+    render: (el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void; "expired-callback"?: () => void; "error-callback"?: () => void }) => string;
+    reset: (widgetId?: string) => void;
+    remove: (widgetId: string) => void;
+};
+
+declare global {
+    interface Window {
+        turnstile?: TurnstileApi;
+    }
+}
+
+let turnstileScriptPromise: Promise<TurnstileApi | null> | null = null;
+function loadTurnstileScript(): Promise<TurnstileApi | null> {
+    if (typeof window === "undefined") return Promise.resolve(null);
+    if (window.turnstile) return Promise.resolve(window.turnstile);
+    if (!turnstileScriptPromise) {
+        turnstileScriptPromise = new Promise((resolve) => {
+            const script = document.createElement("script");
+            script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+            script.async = true;
+            script.defer = true;
+            script.onload = () => resolve(window.turnstile ?? null);
+            script.onerror = () => resolve(null);
+            document.head.appendChild(script);
+        });
+    }
+    return turnstileScriptPromise;
+}
+
 export default function AuthPage() {
     const { message } = App.useApp();
     const navigate = useNavigate();
@@ -26,18 +56,59 @@ export default function AuthPage() {
     const [loginForm] = Form.useForm<LoginValues>();
     const [registerForm] = Form.useForm<RegisterValues>();
 
-    // 注册：邮箱验证码相关
+    // 注册：邮箱验证码与 Turnstile 人机校验
     const [emailVerificationRequired, setEmailVerificationRequired] = useState(false);
+    const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
+    const [turnstileToken, setTurnstileToken] = useState("");
+    const turnstileBoxRef = useRef<HTMLDivElement | null>(null);
+    const turnstileWidgetRef = useRef<string | null>(null);
     const [sendingCode, setSendingCode] = useState(false);
     const [countdown, setCountdown] = useState(0);
     const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
-        if (tab !== "register") return;
         fetchStatus(FIXED_BASE_URL)
-            .then((status) => setEmailVerificationRequired(!!status.email_verification))
+            .then((status) => {
+                setEmailVerificationRequired(!!status.email_verification);
+                if (status.turnstile_check && status.turnstile_site_key) {
+                    setTurnstileSiteKey(status.turnstile_site_key);
+                }
+            })
             .catch(() => { /* 忽略状态拉取失败 */ });
-    }, [tab]);
+    }, []);
+
+    useEffect(() => {
+        if (!turnstileSiteKey || !turnstileBoxRef.current) return;
+        let cancelled = false;
+        void loadTurnstileScript().then((api) => {
+            if (cancelled || !api || !turnstileBoxRef.current) return;
+            if (turnstileWidgetRef.current) {
+                api.remove(turnstileWidgetRef.current);
+                turnstileWidgetRef.current = null;
+            }
+            turnstileWidgetRef.current = api.render(turnstileBoxRef.current, {
+                sitekey: turnstileSiteKey,
+                callback: (token) => setTurnstileToken(token),
+                "expired-callback": () => setTurnstileToken(""),
+                "error-callback": () => setTurnstileToken(""),
+            });
+        });
+        return () => {
+            cancelled = true;
+            if (turnstileWidgetRef.current && window.turnstile) {
+                window.turnstile.remove(turnstileWidgetRef.current);
+                turnstileWidgetRef.current = null;
+            }
+            setTurnstileToken("");
+        };
+    }, [turnstileSiteKey, tab]);
+
+    function resetTurnstile() {
+        setTurnstileToken("");
+        if (turnstileWidgetRef.current && window.turnstile) {
+            window.turnstile.reset(turnstileWidgetRef.current);
+        }
+    }
 
     function startCountdown() {
         setCountdown(60);
@@ -52,23 +123,26 @@ export default function AuthPage() {
     async function handleSendCode() {
         const email = registerForm.getFieldValue("email") as string | undefined;
         if (!email) { void message.warning("请先填写邮箱"); return; }
+        if (turnstileSiteKey && !turnstileToken) { void message.warning("请先完成人机验证"); return; }
         setSendingCode(true);
         try {
-            await sendVerificationCode(FIXED_BASE_URL, email);
+            await sendVerificationCode(FIXED_BASE_URL, email, turnstileToken || undefined);
             void message.success("验证码已发送");
             startCountdown();
         } catch (err) {
             void message.error(err instanceof Error ? err.message : "发送失败");
         } finally {
+            if (turnstileSiteKey) resetTurnstile();
             setSendingCode(false);
         }
     }
 
     async function handleLogin(values: LoginValues) {
+        if (turnstileSiteKey && !turnstileToken) { void message.warning("请先完成人机验证"); return; }
         setLoading(true);
         try {
             const effectiveBaseUrl = getEffectiveBaseUrl();
-            const result = await loginWithPassword(FIXED_BASE_URL, values.username, values.password);
+            const result = await loginWithPassword(FIXED_BASE_URL, values.username, values.password, turnstileToken || undefined);
             setSession({ token: result.token, baseUrl: effectiveBaseUrl, user: result.user, accessExpiresAt: result.accessExpiresAt });
             // 渠道凭据必须是「能直接调 /v1/* 的中转 key」：
             // 列表接口返回的是打码 key，新建接口不返回 key，登录 access token 也不是 key。
@@ -83,6 +157,7 @@ export default function AuthPage() {
             navigate("/");
         } catch (err) {
             void message.error(err instanceof Error ? err.message : "登录失败");
+            if (turnstileSiteKey) resetTurnstile();
         } finally {
             setLoading(false);
         }
@@ -90,6 +165,7 @@ export default function AuthPage() {
 
     async function handleRegister(values: RegisterValues) {
         if (values.password !== values.confirmPassword) { void message.error("两次密码不一致"); return; }
+        if (turnstileSiteKey && !turnstileToken) { void message.warning("请先完成人机验证"); return; }
         setLoading(true);
         try {
             await registerUser(FIXED_BASE_URL, {
@@ -97,12 +173,14 @@ export default function AuthPage() {
                 password: values.password,
                 email: values.email || undefined,
                 verification_code: values.verificationCode || undefined,
+                turnstile: turnstileToken || undefined,
             });
             void message.success("注册成功，请登录");
             setTab("login");
             loginForm.setFieldValue("username", values.username);
         } catch (err) {
             void message.error(err instanceof Error ? err.message : "注册失败");
+            if (turnstileSiteKey) resetTurnstile();
         } finally {
             setLoading(false);
         }
@@ -174,6 +252,12 @@ export default function AuthPage() {
                                 注册
                             </Button>
                         </Form>
+                    )}
+
+                    {turnstileSiteKey && (
+                        <div className="mt-4 flex justify-center">
+                            <div ref={turnstileBoxRef} />
+                        </div>
                     )}
                 </div>
             </div>
