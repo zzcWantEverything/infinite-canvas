@@ -1,7 +1,6 @@
 // Minimal image bed: accepts a file upload, stores it on disk, and serves the
-// file publicly. No database, no auth — it sits behind the same host as new-api
-// and is reached only through the frontend's proxy, so the upload token is the
-// new-api one the caller already carries.
+// file publicly. Behind nginx auth_request (external /imgbed/upload requires valid
+// new-api auth) and private Docker network for internal new-api uploads.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -10,8 +9,10 @@ const crypto = require("crypto");
 const PORT = Number(process.env.PORT || 8081);
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const PUBLIC_DIR = path.join(DATA_DIR, "public");
-const MAX_BYTES = Number(process.env.MAX_BYTES || 50) * 1024 * 1024; // 50 MB default
+const MAX_BYTES = Number(process.env.MAX_BYTES || 20) * 1024 * 1024; // 20 MB default
+const MAX_CONCURRENT_UPLOADS = Number(process.env.MAX_CONCURRENT_UPLOADS || 4);
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "audio/mpeg", "audio/wav", "audio/mp3"]);
+const ALLOWED_UPLOAD_ORIGIN_RE = /^https?:\/\/(huayou\.cloud|localhost(:\d+)?|127\.0\.0\.1(:\d+)?)$/i;
 
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
@@ -28,76 +29,165 @@ const EXT_TO_MIME = {
   mp4: "video/mp4", mp3: "audio/mpeg", wav: "audio/wav",
 };
 
-function send(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+let activeUploads = 0;
+
+function corsOrigin(req, publicRead) {
+  if (publicRead) return "*";
+  const origin = req.headers.origin || "";
+  if (ALLOWED_UPLOAD_ORIGIN_RE.test(origin)) return origin;
+  return "https://huayou.cloud";
+}
+
+function send(req, res, status, body, publicRead = false) {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": corsOrigin(req, publicRead),
+    "Vary": "Origin",
+  });
   res.end(typeof body === "string" ? body : JSON.stringify(body));
+}
+
+function matchesMagicBytes(buf, mime) {
+  if (!buf || buf.length < 12) return false;
+  switch (mime) {
+    case "image/png":
+      return buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    case "image/jpeg":
+      return buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    case "image/gif":
+      return buf.slice(0, 6).toString("ascii") === "GIF87a" || buf.slice(0, 6).toString("ascii") === "GIF89a";
+    case "image/webp":
+      return buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP";
+    case "video/mp4":
+      return buf.slice(4, 8).toString("ascii") === "ftyp";
+    case "audio/wav":
+      return buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WAVE";
+    case "audio/mpeg":
+    case "audio/mp3":
+      return buf.slice(0, 3).toString("ascii") === "ID3" || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
+    default:
+      return false;
+  }
 }
 
 const server = http.createServer((req, res) => {
   if (req.method === "OPTIONS") {
-    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" });
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": corsOrigin(req, false),
+      "Access-Control-Allow-Methods": "POST, GET, HEAD, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Vary": "Origin",
+    });
     return res.end();
   }
 
-  // GET /public/<file> — serve the stored file.
-  if (req.method === "GET" && req.url.startsWith("/public/")) {
-    const filePath = path.join(PUBLIC_DIR, path.basename(req.url));
-    if (!filePath.startsWith(PUBLIC_DIR)) return send(res, 403, { error: "forbidden" });
+  // GET / HEAD /public/<file> — serve the stored file.
+  if ((req.method === "GET" || req.method === "HEAD") && req.url.startsWith("/public/")) {
+    const cleanPath = req.url.split("?")[0];
+    const base = path.basename(cleanPath);
+    if (!/^[a-f0-9]{16,64}\.(png|jpg|jpeg|webp|gif|mp4|mp3|wav)$/i.test(base)) {
+      return send(req, res, 404, { error: "not found" }, true);
+    }
+    const filePath = path.join(PUBLIC_DIR, base);
+    if (!filePath.startsWith(PUBLIC_DIR)) return send(req, res, 403, { error: "forbidden" }, true);
     fs.stat(filePath, (err, stat) => {
-      if (err || !stat.isFile()) return send(res, 404, { error: "not found" });
+      if (err || !stat.isFile()) return send(req, res, 404, { error: "not found" }, true);
       const ext = path.extname(filePath).slice(1).toLowerCase();
       res.writeHead(200, {
         "Content-Type": EXT_TO_MIME[ext] || "application/octet-stream",
         "Content-Length": stat.size,
-        "Cache-Control": "public, max-age=31536000",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Access-Control-Allow-Origin": "*",
       });
+      if (req.method === "HEAD") return res.end();
       fs.createReadStream(filePath).pipe(res);
     });
     return;
   }
 
   // GET /health
-  if (req.method === "GET" && req.url === "/health") return send(res, 200, { ok: true });
+  if (req.method === "GET" && req.url === "/health") return send(req, res, 200, { ok: true }, true);
 
   // POST /upload — multipart/form-data with a single `file` field.
   if (req.method === "POST" && req.url === "/upload") {
+    if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
+      return send(req, res, 429, { error: "too many concurrent uploads" });
+    }
     const contentType = req.headers["content-type"] || "";
-    if (!contentType.startsWith("multipart/form-data")) return send(res, 400, { error: "multipart/form-data required" });
+    if (!contentType.startsWith("multipart/form-data")) return send(req, res, 400, { error: "multipart/form-data required" });
 
-    const boundary = contentType.split("boundary=")[1];
-    if (!boundary) return send(res, 400, { error: "missing boundary" });
+    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
+    const boundary = boundaryMatch ? (boundaryMatch[1] || boundaryMatch[2]) : "";
+    if (!boundary) return send(req, res, 400, { error: "missing boundary" });
 
-    let chunks = [];
+    activeUploads++;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        activeUploads = Math.max(0, activeUploads - 1);
+      }
+    };
+    res.on("close", release);
+
+    const chunks = [];
     let totalBytes = 0;
     let aborted = false;
 
     req.on("data", (chunk) => {
+      if (aborted) return;
       totalBytes += chunk.length;
-      if (totalBytes > MAX_BYTES) { aborted = true; req.destroy(); }
+      if (totalBytes > MAX_BYTES) {
+        aborted = true;
+        send(req, res, 413, { error: "file too large" });
+        req.resume();
+        return;
+      }
       chunks.push(chunk);
     });
 
     req.on("end", () => {
-      if (aborted) return send(res, 413, { error: "file too large" });
+      if (aborted) return release();
       const buffer = Buffer.concat(chunks);
       const file = extractFile(buffer, boundary);
-      if (!file) return send(res, 400, { error: "no file field found" });
+      if (!file) { release(); return send(req, res, 400, { error: "no file field found" }); }
 
-      const ext = MIME_TO_EXT[file.contentType] || "bin";
-      const filename = crypto.randomBytes(16).toString("hex") + "." + ext;
+      const mime = file.contentType.split(";")[0].trim().toLowerCase();
+      if (!ALLOWED_TYPES.has(mime)) {
+        release();
+        return send(req, res, 415, { error: "unsupported media type" });
+      }
+      if (!matchesMagicBytes(file.data, mime)) {
+        release();
+        return send(req, res, 400, { error: "file content does not match declared media type" });
+      }
+
+      const ext = MIME_TO_EXT[mime];
+      const hash = crypto.createHash("sha256").update(file.data).digest("hex").slice(0, 32);
+      const filename = hash + "." + ext;
       const savePath = path.join(PUBLIC_DIR, filename);
 
-      fs.writeFile(savePath, file.data, (err) => {
-        if (err) return send(res, 500, { error: "save failed" });
-        send(res, 200, { url: "/public/" + filename, filename, bytes: file.data.length, contentType: file.contentType });
+      fs.access(savePath, fs.constants.F_OK, (existsErr) => {
+        if (!existsErr) {
+          release();
+          return send(req, res, 200, { url: "/public/" + filename, filename, bytes: file.data.length, contentType: mime, dedup: true });
+        }
+        fs.writeFile(savePath, file.data, (err) => {
+          release();
+          if (err) return send(req, res, 500, { error: "save failed" });
+          send(req, res, 200, { url: "/public/" + filename, filename, bytes: file.data.length, contentType: mime });
+        });
       });
     });
 
-    req.on("error", () => { if (!aborted) send(res, 500, { error: "request error" }); });
+    req.on("error", () => {
+      release();
+      if (!aborted && !res.headersSent) send(req, res, 500, { error: "request error" });
+    });
     return;
   }
 
-  send(res, 404, { error: "not found" });
+  send(req, res, 404, { error: "not found" });
 });
 
 function extractFile(buffer, boundary) {
