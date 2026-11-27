@@ -262,7 +262,7 @@ function overviewPrompt(meta: CopyVideoMeta, transcript: string) {
 - 每格标了序号和时间点；格子在时间线上分布均匀，短镜头可能没有独立格子。
 
 一、资产表
-- roles：仅记录出场的人物角色或会说话/表演的拟人化主角（切勿把背包、蜂蜜罐、礼盒、普通商品、普通道具写进 roles）。description 写外观、年龄、体型、发型、服装、配饰、气质（用于生图，不要写声音）；voice 写性别、声音年龄、音色、音高、共鸣位置、语言/方言、基础语速（用于配音和视频声线锁定，不要写外观）。
+- roles：仅记录出场的人物角色或会说话/表演的拟人化主角（切勿把背包、蜂蜜罐、礼盒、普通商品、普通道具写进 roles）。若画面存在不同阵营/桌次/身份的人物（如主桌客人、邻桌客人、服务员等），必须按身份关系分别建项并注明所属阵营，切勿混为一谈。description 写外观、年龄、体型、发型、服装、配饰、气质（用于生图，不要写声音）；voice 写性别、声音年龄、音色、音高、共鸣位置、语言/方言、基础语速（用于配音和视频声线锁定，不要写外观）。
 - scenes：每个实际使用的场景一条，写地点、时间、天气、光线、环境布置、关键陈设。若多个子场景同属同一家展厅、住宅或门店的不同区域，每个出镜子区域分别建一条（如 @现代轻奢厨房、@高端书房会客区），并在 spaceContext 中统一锁定母空间风格。
 - items：只记录实景物理道具、服饰单品或被展示售卖的商品主体（如背包、蜂蜜篮等），写外观、材质、颜色、状态。后期叠加在屏幕上的 UI 浮窗贴片（如手机短视频界面浮层）、花字、标签卡片不要写进 items。
 - name 简短唯一；全片同一对象只允许一个 name。不得编写画面里没有出现的人物/场景/道具。
@@ -278,7 +278,7 @@ function overviewPrompt(meta: CopyVideoMeta, transcript: string) {
 - textStyle：观察全片是否在画面中上部、居中、人物头顶或两侧留白区等主体区域出现非底部字幕的花字、大字标题、强调弹字、流程列表或信息条；若有，用一句话总结全片统一的字体、粗细、配色、描边/投影/底框、典型位置和常见出场动效（例如「白色超粗无衬线黑体大字，带深色柔和投影，常于人物头顶或左侧留白区居中弹出，伴随横向动态模糊残影冲击或逐项累加动效」）；严格忽略底部滚动的常规口播字幕条，若全片无此类屏幕花字则填 ""。
 - title：一句话概括片子内容；ratio：画面比例，如 9:16。
 
-${transcript ? `【音轨转写台词（带时间戳）】\n${transcript}\n核对台词与画面对应关系；同音字按上下文校正，但不得改写内容。` : "【本片没有可用的音轨转写】按画面唇形和字幕判断台词，看不清写「台词待核对」。"}
+${transcript ? `【音轨转写台词（带时间戳）】\n${transcript}\n核对台词与画面对应关系；同音字按上下文校正，但不得改写内容。若转写包含插曲或片尾背景歌曲歌词，请识别为背景音乐/歌声，不要分配为人物口播对白。` : "【本片没有可用的音轨转写】按画面唇形和字幕判断台词，看不清写「台词待核对」。"}
 
 只输出 JSON（不要 markdown 代码块）：
 {
@@ -323,8 +323,9 @@ function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
             ? `【上一单元结束状态${ctx.previousScene ? `（上一场景：${ctx.previousScene}）` : ""}】${ctx.previousEndState}\n请对照本窗第 1 格画面判断衔接方式：\n- 若本窗首格仍在同一场景且延续上一动作/行走/运镜：必须无缝承接站位、朝向、步伐、手势、运镜方向与语流，不重新起步、不重置姿态；\n- 若本窗首格已切换至新场景：明确写「硬切至 @新场景名」，交代人物在新场景的初始站位、朝向与前后景，同时保持人物外观与声音完全锁定。`
             : "",
         ctx.transcript ? `【本窗台词（带时间戳，必须逐字使用）】\n${ctx.transcript}\n台词按时间对齐到节拍；不得改写、增删、重复。时间戳与画面对不上时以画面为准并微调节拍，但台词文字保持原样。` : "【本窗没有可靠台词】按画面唇形/字幕判断，拿不准写「台词待核对」。",
-        ctx.previousDialogue ? `【前面单元已经说过的台词（本窗不要重复）】${ctx.previousDialogue}
-同一句台词全片只写一次；上一窗开始、本窗仍在延续的声音写「承接上一窗」，不要重抄整段。` : "",
+        ctx.previousDialogue ? `【前面单元已经说过的台词（本窗不要重复）】
+${ctx.previousDialogue}
+已经完整说过的句子全片只写一次，不要重抄；但若某句在上一窗因时间边界只说到一半，或上方【本窗台词】中标有「前窗未说完/待衔接」且本窗画面实际说到，必须在本窗对应节拍把尚未说完的内容补写完整，严禁只写「承接上一窗」或「台词待核对」把后续台词吞掉。另外，插曲或片尾背景歌曲歌词只标为背景音乐（ENVIRONMENT/BGM），不得错当成人物现场口播对白。` : "",
         ctx.outline ? `【本窗剧情大纲】
 ${ctx.outline}` : "",
         "",
@@ -748,21 +749,78 @@ function splitSentences(text: string) {
 }
 
 /**
- * 腾讯经常把一整段话识别成一句（`[0:0.000,0:30.080] 全文…`）。
- * 这种整句没法按时间窗分配，按标点拆句后按字数比例分摊时间，至少每个窗口只拿到属于自己那段。
- * 时间比例是估算，提示词里已要求「时间戳与画面对不上时以画面为准」。
+ * 口语/方言短剧常整分钟只有逗号没有句号（或全无标点）。
+ * 当单句时长超过 8 秒或字数超过 36 字时，按逗号/顿号/冒号及长度预算二次拆成短句并按字数比例分摊时间，
+ * 避免一条 60 秒巨无霸分句只落在第 1 窗、导致后续 5~6 个时间窗拿不到任何台词。
+ */
+function splitLongSegment(segment: TranscriptSegment, maxSeconds = 8, maxChars = 36): TranscriptSegment[] {
+    const raw = String(segment.text || "").trim();
+    if (!raw) return [];
+    const span = Math.max(0.1, segment.end - segment.start);
+    if (span <= maxSeconds && raw.length <= maxChars) {
+        return [{ start: segment.start, end: segment.end, text: raw }];
+    }
+
+    const rawClauses = raw
+        .split(/(?<=[，,、：:])/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+    const atoms: string[] = [];
+    for (const clause of rawClauses.length ? rawClauses : [raw]) {
+        if (clause.length <= maxChars) {
+            atoms.push(clause);
+            continue;
+        }
+        const sliceCount = Math.ceil(clause.length / 28);
+        const step = Math.ceil(clause.length / sliceCount);
+        for (let offset = 0; offset < clause.length; offset += step) {
+            const slice = clause.slice(offset, offset + step).trim();
+            if (slice) atoms.push(slice);
+        }
+    }
+
+    const targetChars = Math.min(28, Math.max(8, Math.floor((raw.length * maxSeconds * 0.65) / span)));
+    const minFlushChars = Math.min(8, Math.floor(targetChars * 0.5));
+    const chunks: string[] = [];
+    let buffer = "";
+    for (const atom of atoms) {
+        if (buffer && buffer.length + atom.length > targetChars && buffer.length >= minFlushChars) {
+            chunks.push(buffer);
+            buffer = atom;
+        } else {
+            buffer += atom;
+        }
+    }
+    if (buffer) chunks.push(buffer);
+    if (chunks.length <= 1) return [{ start: segment.start, end: segment.end, text: raw }];
+
+    const totalChars = chunks.reduce((sum, item) => sum + item.length, 0) || 1;
+    let cursor = segment.start;
+    return chunks.map((chunk, index) => {
+        const nextEnd = index === chunks.length - 1 ? segment.end : cursor + (span * chunk.length) / totalChars;
+        const out = { start: cursor, end: nextEnd, text: chunk };
+        cursor = nextEnd;
+        return out;
+    });
+}
+
+/**
+ * 腾讯有时整段只返回一句、甚至没有时间戳：能解析就按句拆，超长段再按逗号/停顿拆细，
+ * 按字数比例分摊时间，保证每个窗口都能拿到属于自己那段的参考台词。
  */
 function splitBySentence(segment: TranscriptSegment): TranscriptSegment[] {
     const sentences = splitSentences(segment.text);
-    if (sentences.length <= 1) return [segment];
+    if (sentences.length <= 1) return splitLongSegment(segment);
     const total = sentences.reduce((sum, sentence) => sum + sentence.length, 0) || 1;
     const span = Math.max(0.1, segment.end - segment.start);
     let cursor = segment.start;
-    return sentences.map((sentence) => {
-        const next = { start: cursor, end: cursor + (span * sentence.length) / total, text: sentence };
-        cursor = next.end;
-        return next;
-    });
+    return sentences
+        .map((sentence) => {
+            const next = { start: cursor, end: cursor + (span * sentence.length) / total, text: sentence };
+            cursor = next.end;
+            return next;
+        })
+        .flatMap((item) => splitLongSegment(item));
 }
 
 export function parseTranscript(raw: string): TranscriptSegment[] {
@@ -798,12 +856,14 @@ export function spreadTranscript(raw: string, duration: number): TranscriptSegme
     if (!sentences.length || !Number.isFinite(duration) || duration <= 0) return [];
     const total = sentences.reduce((sum, sentence) => sum + sentence.length, 0) || 1;
     let cursor = 0;
-    return sentences.map((sentence) => {
-        const span = (duration * sentence.length) / total;
-        const segment = { start: cursor, end: cursor + span, text: sentence };
-        cursor += span;
-        return segment;
-    });
+    return sentences
+        .map((sentence) => {
+            const span = (duration * sentence.length) / total;
+            const segment = { start: cursor, end: cursor + span, text: sentence };
+            cursor += span;
+            return segment;
+        })
+        .flatMap((segment) => splitLongSegment(segment));
 }
 
 /** 整片台词（给第一步做全局理解用）。没有时间戳时原样返回。 */
@@ -812,14 +872,51 @@ export function formatTranscript(raw: string, segments: TranscriptSegment[]) {
     return segments.map((segment) => `${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`).join("\n");
 }
 
-/** 只取落在本时间窗内的台词：按句首时间严格分区，相邻窗口不重不漏。 */
-export function transcriptForWindow(segments: TranscriptSegment[], start: number, end: number, isLast = false) {
-    const min = start <= 0.01 ? -Infinity : start;
-    const max = isLast ? Infinity : end;
-    return segments
-        .filter((segment) => segment.start >= min && segment.start < max)
-        .map((segment) => `${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`)
-        .join("\n");
+function normalizeDialogueText(text: string): string {
+    return String(text || "")
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s*[^：:\n]{1,12}[：:]/, ""))
+        .join("")
+        .replace(/【[^】]*】/g, "")
+        .replace(/[\s，。！？、；：“”"'‘’（）()\[\],.!?;:\-…·]+/g, "");
+}
+
+function isSegmentConsumed(segmentText: string, consumedNorm: string): boolean {
+    if (!consumedNorm) return false;
+    const norm = normalizeDialogueText(segmentText);
+    if (norm.length < 4) return false;
+    if (consumedNorm.includes(norm)) return true;
+    const tailLen = Math.min(6, norm.length);
+    const tail = norm.slice(-tailLen);
+    if (!consumedNorm.includes(tail)) return false;
+    const headLen = Math.min(6, norm.length);
+    return consumedNorm.includes(norm.slice(0, headLen));
+}
+
+/**
+ * 取落在本时间窗内的台词（按区间重叠而非仅看句首），并把前 20 秒内尚未被前面窗口说到的句段
+ * 标为「前窗未说完/待衔接」，避免按字数均分估算时间戳漂移或跨窗断句时直接吞掉整段台词。
+ */
+export function transcriptForWindow(segments: TranscriptSegment[], start: number, end: number, isLast = false, consumedText = "") {
+    const lo = start <= 0.01 ? -Infinity : start;
+    const hi = isLast ? Infinity : end;
+    const lookback = Math.max(0, start - 20);
+    const consumedNorm = normalizeDialogueText(consumedText);
+    const lines: string[] = [];
+
+    for (const segment of segments) {
+        const overlaps =
+            (segment.end > lo + 0.05 && segment.start < hi - 0.05) ||
+            (segment.start >= lo && segment.start < hi);
+        if (overlaps) {
+            lines.push(`${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒：${segment.text}`);
+            continue;
+        }
+        if (start > 0.01 && consumedNorm && segment.end <= lo + 0.05 && segment.end >= lookback && !isSegmentConsumed(segment.text, consumedNorm)) {
+            lines.push(`${segment.start.toFixed(1)}-${segment.end.toFixed(1)}秒（前窗未说完/待衔接）：${segment.text}`);
+        }
+    }
+    return lines.join("\n");
 }
 
 /** 角色/场景/物品 → 生成一张参考图（返回 dataUrl 或图片 URL）。提示词由调用方按素材类型拼好。 */
@@ -1331,16 +1428,16 @@ export function normalizeOverview(raw: Record<string, unknown>): CopyOverview {
     };
 }
 
-/** 把第二步产出的实体并回第一步的资产表：同名的以资产表为准，新出现的追加。 */
-export function mergeCasting(overview: CopyOverview, extra: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] }) {
-    const merge = (base: CopyItem[], add: CopyItem[]) => {
-        const names = new Set(base.map((item) => item.name));
-        return [...base, ...add.filter((item) => !names.has(item.name))];
+/** 把第二步产出的实体并回累计资产表：同名的以已有资产为准，新出现的追加。 */
+export function mergeCasting(base: Pick<CopyOverview, "roles" | "scenes" | "items">, extra: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] }) {
+    const merge = (existingList: CopyItem[], add: CopyItem[]) => {
+        const names = new Set(existingList.map((item) => item.name));
+        return [...existingList, ...add.filter((item) => !names.has(item.name))];
     };
     return {
-        roles: merge(overview.roles, extra.roles),
-        scenes: merge(overview.scenes, extra.scenes),
-        items: merge(overview.items, extra.items),
+        roles: merge(base.roles, extra.roles),
+        scenes: merge(base.scenes, extra.scenes),
+        items: merge(base.items, extra.items),
     };
 }
 
@@ -1755,15 +1852,23 @@ export function mergeBatchAnalyses(results: CopyAnalysis[]): CopyAnalysis {
     };
 }
 
-/** 合并后再兜一层：后一个分镜的台词整段包含/被包含于前面某段时清空，避免同一段被写两遍。 */
+/** 合并后再兜一层：后一个分镜的台词完全包含于前面某段时清空，若仅开头重复则裁掉前缀并保留新增台词。 */
 export function dropRepeatedDialogue(analysis: CopyAnalysis): CopyAnalysis {
     const seen: string[] = [];
     const shots = analysis.shots.map((shot) => {
         const text = String(shot.dialogue || "").trim();
         if (!text) return shot;
-        const repeated = seen.some((prev) => prev.length > 15 && (prev.includes(text) || text.includes(prev)));
+        if (seen.some((prev) => prev.length > 15 && prev.includes(text))) {
+            return { ...shot, dialogue: "" };
+        }
+        const prefix = seen.find((prev) => prev.length > 15 && text.startsWith(prev));
+        if (prefix) {
+            const rest = text.slice(prefix.length).replace(/^[，。！？、；：,\.!?;:\s]+/, "").trim();
+            if (rest) seen.push(rest);
+            return { ...shot, dialogue: rest };
+        }
         seen.push(text);
-        return repeated ? { ...shot, dialogue: "" } : shot;
+        return shot;
     });
     return { ...analysis, shots };
 }

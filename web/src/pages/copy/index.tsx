@@ -363,9 +363,9 @@ export default function CopyVideoPage() {
             let segments = parseTranscript(rawTranscript);
             if (!segments.length && rawTranscript.trim()) segments = spreadTranscript(rawTranscript, meta.duration);
             setAnalysisPercent(15);
-            // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格。
+            // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格（长片抽 36 帧降低遗漏）。
             setAnalysisStage("overview");
-            const overviewFrames = sampleFrames(frames, 24);
+            const overviewFrames = sampleFrames(frames, meta.duration > 60 ? 36 : 24);
             const overviewGrid = await buildFrameGrid(overviewFrames, meta.width / meta.height);
             const overview = await analyzeOverview(overviewGrid, meta, ANALYSIS_MODEL, sessionToken, formatTranscript(rawTranscript, segments));
             setAnalysisPercent(25);
@@ -399,8 +399,8 @@ export default function CopyVideoPage() {
                         endTime,
                         cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
                         casting,
-                        // 只给本窗自己的台词：按句首时间严格半开区间分区，不重不漏。
-                        transcript: transcriptForWindow(segments, startTime, endTime, index === windows.length - 1),
+                        // 按区间重叠 + 前窗未说完/待衔接台词分发，避免跨窗或时间戳漂移吞掉整段对白
+                        transcript: transcriptForWindow(segments, startTime, endTime, index === windows.length - 1, usedDialogue.join("\n")),
                         outline: outlineForWindow(overview.outline, startTime, endTime),
                         textStyle: overview.textStyle,
                         spaceContext: overview.spaceContext,
@@ -414,9 +414,12 @@ export default function CopyVideoPage() {
                     message.warning(t("copyVideo.batchPartial", { current: index + 1, total: windows.length }));
                     break;
                 }
-                casting = mergeCasting(overview, partial);
+                casting = mergeCasting(casting, partial);
                 result = result ? mergeBatchAnalyses([result, partial]) : partial;
-                for (const shot of partial.shots) if (shot.dialogue?.trim()) usedDialogue.push(shot.dialogue.trim());
+                for (const shot of partial.shots) {
+                    const line = shot.dialogue?.trim();
+                    if (line && line !== "台词待核对") usedDialogue.push(line);
+                }
                 const last = partial.shots[partial.shots.length - 1];
                 if (last) {
                     const promptLines = last.videoPrompt
