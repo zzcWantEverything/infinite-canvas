@@ -158,6 +158,8 @@ export type CopyOverview = {
     outline: CopyOutlineUnit[];
 };
 
+export type CopyShotUnitTarget = 15 | 30;
+
 export type CopyWindowContext = {
     index: number;
     total: number;
@@ -165,6 +167,8 @@ export type CopyWindowContext = {
     endTime: number;
     /** 本窗范围内的切点时间（秒） */
     cuts?: number[];
+    /** 用户可选的目标单条分镜时长（15s / 30s）；未选则按默认智能切分（5~15s） */
+    targetUnitSeconds?: CopyShotUnitTarget;
     /** 第一步锁定的资产表 */
     casting: { roles: CopyItem[]; scenes: CopyItem[]; items: CopyItem[] };
     /** 本窗内的台词（带时间戳，原样使用） */
@@ -226,9 +230,16 @@ function formatCuts(cuts: number[] | undefined, max = 40) {
 
 const castingLine = (items: CopyItem[]) => items.map((item) => `${item.name}（${item.description || "无描述"}${item.voice ? `；声线：${item.voice}` : ""}）`).join("、");
 
-/** 导演规则：从《AI影视动态分镜生成系统 V2.0》收敛成模型能直接执行的一段。 */
-const directingRules = `【导演规则】
-1. 单元与节拍：一条分镜=一次视频生成任务出片的单位，5~15 秒；对白密集 5~8 秒，动作/空镜可 10~15 秒。
+/** 导演规则：从《AI影视动态分镜生成系统 V2.0》收敛成模型能直接执行的一段，并按目标单条分镜时长动态调整切分口径。 */
+function buildDirectingRules(targetUnitSeconds?: CopyShotUnitTarget) {
+    const unitRule =
+        targetUnitSeconds === 30
+            ? "1. 单元与节拍：一条分镜=一次视频生成任务出片的单位，目标 20~30 秒（匹配 30s 视频模型，单单元最长 30 秒，全片不足 30 秒可整片合为 1 个单元，末尾余段可 8~30 秒）。"
+            : targetUnitSeconds === 15
+              ? "1. 单元与节拍：一条分镜=一次视频生成任务出片的单位，目标 10~15 秒（匹配 15s 视频模型，单单元最长 15 秒，尽量减少 5 秒碎分镜，末尾余段可 5~15 秒）。"
+              : "1. 单元与节拍：一条分镜=一次视频生成任务出片的单位，5~15 秒；对白密集 5~8 秒，动作/空镜可 10~15 秒。";
+    return `【导演规则】
+${unitRule}
    原片里的硬切、反打、推拉、台词切换都写进同一单元的节拍里，不要一个切点开一个单元。
    先按台词实际发音时长、呼吸停顿和表演需要定节拍，再让各节拍首尾相接、不重叠、不留空档，总和必须等于单元时长。
    台词不得删减、改写、重复；一句话跨节拍时只写一次，后续节拍写「承接上一拍」。
@@ -250,9 +261,18 @@ const directingRules = `【导演规则】
    - 累积列表/并排标签：多条关键词或圆角标签依次弹出且已出现的保留在原位形成完整纵向列表或并排排列，写清逐项出现与最后整体退场时机；
    - 屏幕 UI 浮窗/贴片：如角落滑入的手机短视频界面、卡片浮层，写清画面位置、内部展示内容与滑入/退出动效及时间（这类贴片不进入 items 实景道具表）。
    同一视频反复出现的同类花字必须沿用已锁定的全片花字风格；若原片该单元无 (b) 类元素则不得凭空编造，onScreenText 留空字符串；无论有无花字都不得生成底部口播字幕。`;
+}
 
 /** 第一步：稀疏宫格 → 资产表 + 分镜大纲。 */
-function overviewPrompt(meta: CopyVideoMeta, transcript: string) {
+function overviewPrompt(meta: CopyVideoMeta, transcript: string, targetUnitSeconds?: CopyShotUnitTarget) {
+    const estCount15 = Math.max(1, Math.ceil(meta.duration / 15));
+    const estCount30 = Math.max(1, Math.ceil(meta.duration / 30));
+    const outlineUnitRule =
+        targetUnitSeconds === 30
+            ? `- 按「一次生视频出片」的单元切分：目标每单元 20~30 秒（匹配 30s 视频模型，单单元最长不超过 30 秒，全片不足 30 秒可整片作为 1 个单元），单元数量 ≈ ${estCount30} 个（可按场景与完整句末上下微调）。`
+            : targetUnitSeconds === 15
+              ? `- 按「一次生视频出片」的单元切分：目标每单元 10~15 秒（匹配 15s 视频模型，单单元最长不超过 15 秒，尽量合并 5 秒以内零碎段），单元数量 ≈ ${estCount15} 个（可按场景与完整句末上下微调）。`
+              : `- 按「一次生视频出片」的单元切分：每单元 5~15 秒，单元数量 ≈ 总时长 ÷ 10（上下浮动 2 个）。`;
     return `你是一名电影导演、摄影指导和分镜设计师。这是分镜分析的第一步：只看全片稀疏宫格，建立资产表和分镜大纲，不要写逐镜细节。
 
 视频元数据：
@@ -268,7 +288,7 @@ function overviewPrompt(meta: CopyVideoMeta, transcript: string) {
 - name 简短唯一；全片同一对象只允许一个 name。不得编写画面里没有出现的人物/场景/道具。
 
 二、分镜大纲（outline）
-- 按「一次生视频出片」的单元切分：每单元 5~15 秒，单元数量 ≈ 总时长 ÷ 10（上下浮动 2 个）。
+${outlineUnitRule}
 - 每个单元写一句话剧情 summary，并列出本单元涉及的 roles / scenes / items（必须用资产表里的 name）。
 - 单元首尾相接、覆盖全片，不留空档；边界优先落在场景切换、完整句末停顿或情绪转折处。
 
@@ -298,6 +318,13 @@ ${transcript ? `【音轨转写台词（带时间戳）】\n${transcript}\n核�
 
 /** 第二步：逐时间窗细化，产出可直接出片的分镜单元。 */
 function windowPrompt(meta: CopyVideoMeta, ctx: CopyWindowContext) {
+    const winSpan = Math.max(0.1, ctx.endTime - ctx.startTime);
+    const maxUnit = ctx.targetUnitSeconds ?? 15;
+    const sampleEnd = ctx.targetUnitSeconds ? ctx.endTime : Math.min(ctx.startTime + 8, ctx.endTime);
+    const sampleDuration = Math.max(0.1, sampleEnd - ctx.startTime);
+    const unitLengthRequirement = ctx.targetUnitSeconds
+        ? `- 本窗优先合并输出 1 个覆盖整窗的完整分镜单元（时长 ${winSpan.toFixed(1)} 秒，严格不超过 ${maxUnit} 秒，不要再拆成多条短分镜），内部按时间顺序写清本段全部镜次与节拍。`
+        : `- 单元时长 5~15 秒且不得超过本窗长度（${winSpan.toFixed(1)} 秒）；本窗不足 5 秒时只写一个覆盖整窗的单元。`;
     const lines = [
         `你是一名电影导演、摄影指导、表演指导和声音导演。这是分镜分析的第二步：把所有已锁定的资产交给模型，细化第 ${ctx.index}/${ctx.total} 个时间窗内的分镜单元。`,
         "",
@@ -329,11 +356,11 @@ ${ctx.previousDialogue}
         ctx.outline ? `【本窗剧情大纲】
 ${ctx.outline}` : "",
         "",
-        directingRules,
+        buildDirectingRules(ctx.targetUnitSeconds),
         "",
         "【输出要求】",
         `- shots 只写完全落在本窗 ${ctx.startTime.toFixed(1)}~${ctx.endTime.toFixed(1)} 秒范围内的单元，按时间排序，首尾相接覆盖本窗。`,
-        `- 单元时长 5~15 秒且不得超过本窗长度（${(ctx.endTime - ctx.startTime).toFixed(1)} 秒）；本窗不足 5 秒时只写一个覆盖整窗的单元。`,
+        unitLengthRequirement,
         `- start / end / duration 一律用全片绝对时间（本窗起点是 ${ctx.startTime.toFixed(1)} 秒），不要每个窗都从 0.0 秒重新计时。`,
         "- 每个单元的 videoPrompt 第一行格式为「【起-止秒】无底部口播字幕」，之后每行一个节拍：「起-止秒：[延续/硬切至] @场景 中，<景别><角度><焦段感><机位高度><运动><构图与文字留白>拍摄。@角色 <位置朝向、与台词关键词同步的手势/微表情/呼吸>，说道（<语速/重读/情绪>）：\"台词\"。屏幕中<留白位置>以<字体/配色/投影/编排模式/动效>出现“精确文字”（<出现-消失时间>）。SFX/ENVIRONMENT：<伴随脚步/触碰/弹字音效，音量低于人声>。」",
         "- 每个节拍（无论有无台词）都补全脚步声、衣物摩擦、手指触碰物体、界面滑入、文字弹出、认知反转低频强调音等真实音效/环境声，标注声音类型并注明音效低于人声；镜头切至手部/局部特写但同一人继续说话时，仍标 DIALOGUE 延续原人物声线，不得改成旁白。",
@@ -346,9 +373,9 @@ ${ctx.outline}` : "",
         `{
   "shots": [{
     "start": "${ctx.startTime.toFixed(1)}秒",
-    "end": "${Math.min(ctx.startTime + 8, ctx.endTime).toFixed(1)}秒",
-    "duration": "${Math.min(8, ctx.endTime - ctx.startTime).toFixed(1)}秒",
-    "videoPrompt": "【${ctx.startTime.toFixed(1)}-${Math.min(ctx.startTime + 8, ctx.endTime).toFixed(1)}秒】无底部口播字幕\n节拍1起-止秒：在 @场景名 中，…（写出景别/焦段/机位/留白、关键词同步动作、台词语气、屏幕花字/UI贴片及伴随 SFX）\n节拍2起-止秒：…",
+    "end": "${sampleEnd.toFixed(1)}秒",
+    "duration": "${sampleDuration.toFixed(1)}秒",
+    "videoPrompt": "【${ctx.startTime.toFixed(1)}-${sampleEnd.toFixed(1)}秒】无底部口播字幕\n节拍1起-止秒：在 @场景名 中，…（写出景别/焦段/机位/留白、关键词同步动作、台词语气、屏幕花字/UI贴片及伴随 SFX）\n节拍2起-止秒：…",
     "shotSize": "特写/近景/中景/全景/远景",
     "cameraAngle": "平视/俯拍/仰拍/正面/侧面/过肩等，含机位高低",
     "cameraMove": "固定/推/拉/摇/移/跟/手持，含起止位置",
@@ -617,8 +644,9 @@ export async function analyzeOverview(
     sessionToken: string,
     transcript = "",
     signal?: AbortSignal,
+    targetUnitSeconds?: CopyShotUnitTarget,
 ): Promise<CopyOverview> {
-    const content = await runAnalyzeJob(sessionToken, model, overviewPrompt(meta, transcript), gridDataUrl, signal);
+    const content = await runAnalyzeJob(sessionToken, model, overviewPrompt(meta, transcript, targetUnitSeconds), gridDataUrl, signal);
     return normalizeOverview(extractJson(content));
 }
 
@@ -632,7 +660,7 @@ export async function analyzeShotsWindow(
     signal?: AbortSignal,
 ): Promise<CopyAnalysis> {
     const content = await runAnalyzeJob(sessionToken, model, windowPrompt(meta, ctx), gridDataUrl, signal);
-    const clamped = clampWindowShots(normalizeAnalysis(extractJson(content)), ctx.startTime, ctx.endTime);
+    const clamped = clampWindowShots(normalizeAnalysis(extractJson(content)), ctx.startTime, ctx.endTime, ctx.targetUnitSeconds ?? 15);
     const mergedAssets = {
         roles: [...ctx.casting.roles, ...clamped.roles.filter((item) => !ctx.casting.roles.some((base) => base.name === item.name))],
         scenes: [...ctx.casting.scenes, ...clamped.scenes.filter((item) => !ctx.casting.scenes.some((base) => base.name === item.name))],
@@ -1443,16 +1471,17 @@ export function mergeCasting(base: Pick<CopyOverview, "roles" | "scenes" | "item
 
 /**
  * 窗口产出的时间要归一：模型可能写成窗内相对时间（从 0 开始），也可能越过窗口边界。
- * 这里统一映射成全片绝对时间并夹在本窗内，单元时长封顶 15 秒；完全落在窗外的丢弃。
+ * 这里统一映射成全片绝对时间并夹在本窗内，单元时长按目标切分规格封顶（默认 15s，选 30s 时 30s）；完全落在窗外的丢弃。
  * 不做这一步，几个窗口会各自从 0 秒开始，合并时按起始时间去重，后面的单元就全没了。
  */
-export function clampWindowShots(analysis: CopyAnalysis, start: number, end: number): CopyAnalysis {
+export function clampWindowShots(analysis: CopyAnalysis, start: number, end: number, maxUnitSeconds = 15): CopyAnalysis {
+    const maxSpan = Math.max(5, maxUnitSeconds);
     const shots = analysis.shots
         .map((shot) => {
             let s = shotStartSeconds(shot.start);
             let e = shotStartSeconds(shot.end);
             if (!Number.isFinite(s)) s = start;
-            if (!Number.isFinite(e) || e <= s) e = s + Math.min(8, Math.max(1, end - s));
+            if (!Number.isFinite(e) || e <= s) e = s + Math.min(maxSpan, Math.max(1, end - s));
             // 窗内相对时间 → 绝对时间（只对非首个窗口做，避免把 0.x 秒的合法起点改坏）
             if (start > 0.05 && s < start - 0.5) {
                 s += start;
@@ -1460,7 +1489,7 @@ export function clampWindowShots(analysis: CopyAnalysis, start: number, end: num
             }
             s = Math.max(start, Math.min(s, Math.max(start, end - 0.1)));
             e = Math.min(end, Math.max(s + 0.1, e));
-            if (e - s > 15) e = s + 15;
+            if (e - s > maxSpan) e = s + maxSpan;
             return { ...shot, start: `${s.toFixed(1)}秒`, end: `${e.toFixed(1)}秒`, duration: `${(e - s).toFixed(1)}秒` };
         })
         .filter((shot) => Number(shot.end.replace(/[^0-9.]/g, "")) > Number(shot.start.replace(/[^0-9.]/g, "")));
@@ -1638,6 +1667,7 @@ export type PlanAnalysisWindowsOptions = {
     outline?: CopyOutlineUnit[];
     cuts?: number[];
     segments?: TranscriptSegment[];
+    targetUnitSeconds?: CopyShotUnitTarget;
     maxWindowSeconds?: number;
     minWindowSeconds?: number;
     maxCells?: number;
@@ -1650,8 +1680,9 @@ export type PlanAnalysisWindowsOptions = {
 export function planAnalysisWindows(frames: CopyFrame[], duration: number, options: PlanAnalysisWindowsOptions = {}): CopyTimeWindow[] {
     const sorted = [...frames].sort((a, b) => a.time - b.time);
     if (!sorted.length || !Number.isFinite(duration) || duration <= 0) return [];
-    const maxWindow = Math.max(5, options.maxWindowSeconds ?? 15);
-    const minWindow = Math.min(maxWindow, Math.max(1, options.minWindowSeconds ?? 5));
+    const maxWindow = Math.max(5, options.maxWindowSeconds ?? options.targetUnitSeconds ?? 15);
+    const defaultMin = options.targetUnitSeconds === 30 ? 18 : options.targetUnitSeconds === 15 ? 10 : 5;
+    const minWindow = Math.min(maxWindow, Math.max(1, options.minWindowSeconds ?? defaultMin));
     const maxCells = Math.max(1, options.maxCells ?? 18);
     const cuts = (options.cuts ?? []).filter((time) => Number.isFinite(time) && time > 0 && time < duration).sort((a, b) => a - b);
     const segments = (options.segments ?? []).filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
@@ -1745,8 +1776,8 @@ export function planAnalysisWindows(frames: CopyFrame[], duration: number, optio
         while (duration - cursor > maxWindow) {
             const remaining = duration - cursor;
             const maxAllowed = remaining < maxWindow + minWindow ? Math.max(1, remaining - minWindow) : maxWindow;
-            const target = Math.min(maxAllowed, 12);
-            const lo = cursor + Math.min(Math.max(minWindow, 9), maxAllowed);
+            const target = Math.min(maxAllowed, options.targetUnitSeconds ? Math.max(minWindow, options.targetUnitSeconds - 1) : 12);
+            const lo = cursor + Math.min(Math.max(minWindow, options.targetUnitSeconds ? minWindow : 9), maxAllowed);
             const hi = cursor + maxAllowed;
             let next = lo <= hi ? pickBestBoundary(cursor + target, lo, hi, cuts, segments) : cursor + maxAllowed;
             if (next <= cursor + 0.5) next = Math.min(duration, cursor + maxWindow);

@@ -69,6 +69,7 @@ import {
     type CopyItem,
     type CopyResolvedAsset,
     type CopyShot,
+    type CopyShotUnitTarget,
     type ShotReferenceBinding,
     type TermReplaceOptions,
     type TermReplaceRule,
@@ -113,6 +114,8 @@ export default function CopyVideoPage() {
 
     const [file, setFile] = useState<File | null>(null);
     const [videoUrl, setVideoUrl] = useState("");
+    const [videoDuration, setVideoDuration] = useState<number | null>(null);
+    const [shotUnitTarget, setShotUnitTarget] = useState<CopyShotUnitTarget | null>(null);
     const [analysis, setAnalysis] = useState<CopyAnalysis | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
     // 只暴露一个百分比进度条：分批/抽帧/转写这些过程对用户没意义。
@@ -299,6 +302,8 @@ export default function CopyVideoPage() {
         if (videoUrl) URL.revokeObjectURL(videoUrl);
         setFile(next);
         setVideoUrl(URL.createObjectURL(next));
+        setVideoDuration(null);
+        setShotUnitTarget(null);
         setAnalysis(null);
         setError("");
     };
@@ -363,20 +368,31 @@ export default function CopyVideoPage() {
             let segments = parseTranscript(rawTranscript);
             if (!segments.length && rawTranscript.trim()) segments = spreadTranscript(rawTranscript, meta.duration);
             setAnalysisPercent(15);
+            const effectiveTarget: CopyShotUnitTarget | undefined =
+                shotUnitTarget === 30 && meta.duration <= 15 ? undefined : (shotUnitTarget ?? undefined);
             // 3) 第一步：全片稀疏宫格 → 资产表（角色/场景/物品 + 声线）+ 分镜大纲 + 风格（长片抽 36 帧降低遗漏）。
             setAnalysisStage("overview");
             const overviewFrames = sampleFrames(frames, meta.duration > 60 ? 36 : 24);
             const overviewGrid = await buildFrameGrid(overviewFrames, meta.width / meta.height);
-            const overview = await analyzeOverview(overviewGrid, meta, ANALYSIS_MODEL, sessionToken, formatTranscript(rawTranscript, segments));
+            const overview = await analyzeOverview(
+                overviewGrid,
+                meta,
+                ANALYSIS_MODEL,
+                sessionToken,
+                formatTranscript(rawTranscript, segments),
+                undefined,
+                effectiveTarget,
+            );
             setAnalysisPercent(25);
             // 4) 第二步：按大纲 + 切点/句末边界智能切窗，串行——后面的窗要吃前面窗定下的资产、场景与收尾状态。
             const windows = planAnalysisWindows(frames, meta.duration, {
                 outline: overview.outline,
                 cuts: meta.cuts,
                 segments,
-                maxWindowSeconds: 15,
-                minWindowSeconds: 5,
-                maxCells: 18,
+                targetUnitSeconds: effectiveTarget,
+                maxWindowSeconds: effectiveTarget ?? 15,
+                minWindowSeconds: effectiveTarget === 30 ? 18 : effectiveTarget === 15 ? 10 : 5,
+                maxCells: effectiveTarget === 30 ? 24 : 18,
             });
             let result: CopyAnalysis | null = null;
             let casting = { roles: overview.roles, scenes: overview.scenes, items: overview.items };
@@ -398,6 +414,7 @@ export default function CopyVideoPage() {
                         startTime,
                         endTime,
                         cuts: (meta.cuts ?? []).filter((time) => time >= startTime - 0.01 && time <= endTime + 0.01),
+                        targetUnitSeconds: effectiveTarget,
                         casting,
                         // 按区间重叠 + 前窗未说完/待衔接台词分发，避免跨窗或时间戳漂移吞掉整段对白
                         transcript: transcriptForWindow(segments, startTime, endTime, index === windows.length - 1, usedDialogue.join("\n")),
@@ -1167,22 +1184,77 @@ export default function CopyVideoPage() {
                 {!analysis ? (
                     <section className="flex flex-col gap-4 rounded-2xl border border-stone-200/70 bg-background p-4 dark:border-stone-800">
                         {videoUrl ? (
-                            <div className="relative overflow-hidden rounded-xl bg-black">
-                                <video src={videoUrl} controls className="max-h-[420px] w-full object-contain" />
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        if (videoUrl) URL.revokeObjectURL(videoUrl);
-                                        setFile(null);
-                                        setVideoUrl("");
-                                    }}
-                                    className="absolute right-2 top-2 rounded-full bg-black/60 p-1.5 transition hover:bg-black/80"
-                                    style={{ color: "#fff" }}
-                                    aria-label={t("copyVideo.remove")}
-                                >
-                                    <X className="size-4" />
-                                </button>
-                            </div>
+                            <>
+                                <div className="relative overflow-hidden rounded-xl bg-black">
+                                    <video
+                                        src={videoUrl}
+                                        controls
+                                        onLoadedMetadata={(event) => {
+                                            const duration = event.currentTarget.duration;
+                                            if (Number.isFinite(duration) && duration > 0) {
+                                                setVideoDuration(duration);
+                                                setShotUnitTarget((prev) => (prev === 30 && duration <= 15 ? null : prev));
+                                            }
+                                        }}
+                                        className="max-h-[420px] w-full object-contain"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (videoUrl) URL.revokeObjectURL(videoUrl);
+                                            setFile(null);
+                                            setVideoUrl("");
+                                            setVideoDuration(null);
+                                            setShotUnitTarget(null);
+                                        }}
+                                        className="absolute right-2 top-2 rounded-full bg-black/60 p-1.5 transition hover:bg-black/80"
+                                        style={{ color: "#fff" }}
+                                        aria-label={t("copyVideo.remove")}
+                                    >
+                                        <X className="size-4" />
+                                    </button>
+                                </div>
+                                <div className="flex flex-col gap-1.5 rounded-xl border border-stone-200/70 bg-stone-50/70 px-3.5 py-2.5 dark:border-stone-800 dark:bg-stone-900/40">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="text-xs font-medium text-stone-700 dark:text-stone-200">{t("copyVideo.segmentDuration")}</span>
+                                        {videoDuration !== null ? (
+                                            <span className="rounded-md bg-stone-200/70 px-1.5 py-0.5 text-[11px] tabular-nums text-stone-600 dark:bg-stone-800 dark:text-stone-300">
+                                                {t("copyVideo.segmentVideoLength", { seconds: videoDuration.toFixed(1) })}
+                                            </span>
+                                        ) : null}
+                                        <div className="flex items-center gap-2">
+                                            {([15, 30] as const).map((sec) => {
+                                                const active = shotUnitTarget === sec;
+                                                const disabled = analyzing || (sec === 30 && videoDuration !== null && videoDuration <= 15);
+                                                const estimate = videoDuration !== null ? Math.max(1, Math.ceil(videoDuration / sec)) : null;
+                                                return (
+                                                    <button
+                                                        key={sec}
+                                                        type="button"
+                                                        disabled={disabled}
+                                                        title={sec === 30 && videoDuration !== null && videoDuration <= 15 ? t("copyVideo.segment30Disabled") : undefined}
+                                                        onClick={() => setShotUnitTarget((prev) => (prev === sec ? null : sec))}
+                                                        className={[
+                                                            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors",
+                                                            disabled
+                                                                ? "cursor-not-allowed border-stone-200/60 text-stone-300 dark:border-stone-800 dark:text-stone-600"
+                                                                : active
+                                                                  ? "border-amber-500/80 bg-amber-500/15 text-amber-700 dark:border-amber-400/70 dark:text-amber-300"
+                                                                  : "border-stone-200 bg-background text-stone-600 hover:border-stone-400 hover:text-stone-900 dark:border-stone-700 dark:text-stone-300 dark:hover:border-stone-500",
+                                                        ].join(" ")}
+                                                    >
+                                                        <span>{sec}s</span>
+                                                        {estimate !== null && !disabled ? (
+                                                            <span className="text-[10px] opacity-75">· {t("copyVideo.segmentEstimate", { count: estimate })}</span>
+                                                        ) : null}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                    <p className="text-[11px] text-stone-400 dark:text-stone-500">{t("copyVideo.segmentDurationHint")}</p>
+                                </div>
+                            </>
                         ) : (
                             <button
                                 type="button"

@@ -3,7 +3,7 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
-import { readAxiosError, readStatusError } from "./http";
+import { readAxiosError, readFailureMessage, readStatusError } from "./http";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
@@ -895,19 +895,59 @@ export interface ImageTaskState {
     error?: string;
 }
 
-/** 提交一张图片任务，返回网关任务 ID。 */
-export async function createImageTask(config: AiConfig, body: Record<string, unknown>, options?: RequestOptions): Promise<string> {
-    try {
-        const response = await axios.post<{ task_id?: string; id?: string }>(aiApiUrl(config, `/tasks/${IMAGE_TASK_PLUGIN}`), body, {
-            headers: aiHeaders(config, "application/json"),
-            signal: options?.signal,
-        });
-        const taskId = String(response.data?.task_id || response.data?.id || "");
-        if (!taskId) throw new Error(apiText("requestFailed"));
-        return taskId;
-    } catch (error) {
-        throw new Error(readAxiosError(error, apiText("requestFailed")));
+function isAbortError(error: unknown) {
+    return (error instanceof DOMException && error.name === "AbortError") || axios.isCancel(error);
+}
+
+function waitMs(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+function isTransientTaskSubmitError(error: unknown): boolean {
+    if (typeof error === "object" && error !== null && "kind" in error) {
+        const apiErr = error as { kind?: string; status?: number };
+        if (apiErr.kind === "network") return true;
+        if (apiErr.status === 502 || apiErr.status === 503 || apiErr.status === 504) return true;
     }
+    if (axios.isAxiosError(error)) {
+        if (!error.response) return true;
+        return error.response.status === 502 || error.response.status === 503 || error.response.status === 504;
+    }
+    return false;
+}
+
+/** 提交一张图片任务，返回网关任务 ID（遇到瞬时 502/503/504 或网络抖动自动重试一次）。 */
+export async function createImageTask(config: AiConfig, body: Record<string, unknown>, options?: RequestOptions): Promise<string> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            const response = await axios.post<{ task_id?: string; id?: string }>(aiApiUrl(config, `/tasks/${IMAGE_TASK_PLUGIN}`), body, {
+                headers: aiHeaders(config, "application/json"),
+                signal: options?.signal,
+            });
+            const taskId = String(response.data?.task_id || response.data?.id || "");
+            if (!taskId) throw new Error(apiText("requestFailed"));
+            return taskId;
+        } catch (error) {
+            if (isAbortError(error)) throw error;
+            if (attempt === 0 && isTransientTaskSubmitError(error)) {
+                await waitMs(2000, options?.signal);
+                continue;
+            }
+            throw new Error(readAxiosError(error, apiText("requestFailed")));
+        }
+    }
+    throw new Error(apiText("requestFailed"));
 }
 
 /** 查一次任务状态。 */
@@ -933,14 +973,75 @@ export async function fetchImageTaskUrls(config: AiConfig, taskId: string, optio
         });
 }
 
+const POLL_TRANSIENT_BACKOFFS = [3000, 5000, 8000, 10000, 10000, 10000];
+const DOWNLOAD_RETRY_BACKOFFS = [1500, 3000, 5000, 8000];
+
 export async function waitForImageTask(config: AiConfig, taskId: string, options?: RequestOptions): Promise<string[]> {
+    let transientErrors = 0;
     for (;;) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const state = await pollImageTask(config, taskId, options);
-        if (state.status === "success") return fetchImageTaskUrls(config, taskId, options);
-        if (state.status === "failed") throw new Error(state.error || apiText("imageGenerationFailed"));
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        let state: ImageTaskState;
+        try {
+            state = await pollImageTask(config, taskId, options);
+        } catch (error) {
+            if (isAbortError(error)) throw error;
+            transientErrors += 1;
+            if (transientErrors > POLL_TRANSIENT_BACKOFFS.length) {
+                throw new Error(readAxiosError(error, apiText("requestFailed")));
+            }
+            await waitMs(POLL_TRANSIENT_BACKOFFS[transientErrors - 1], options?.signal);
+            continue;
+        }
+        transientErrors = 0;
+        if (state.status === "failed") throw new Error(readFailureMessage(state.error, apiText("imageGenerationFailed")));
+        if (state.status === "success") {
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                try {
+                    const urls = await fetchImageTaskUrls(config, taskId, options);
+                    if (urls.length > 0) return urls;
+                } catch (error) {
+                    if (isAbortError(error) || attempt === 2) throw new Error(readAxiosError(error, apiText("requestFailed")));
+                }
+                await waitMs(2000, options?.signal);
+            }
+            throw new Error(apiText("noImageReturned"));
+        }
+        await waitMs(5000, options?.signal);
     }
+}
+
+/**
+ * 拉取任务产物图片并校验：上游 CDN 刚出图偶发返回 404/JSON 错误体或瞬时抖动，
+ * 这里做响应头与体积校验 + 退避重试（必要时刷新 artifact 签名地址），并规范非 image MIME。
+ */
+export async function downloadTaskImageBlob(config: AiConfig, taskId: string, initialUrls: string[], options?: RequestOptions): Promise<Blob> {
+    let urls = initialUrls.filter(Boolean);
+    for (let attempt = 0; attempt <= DOWNLOAD_RETRY_BACKOFFS.length; attempt += 1) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        if ((attempt >= 2 || urls.length === 0) && taskId) {
+            urls = await fetchImageTaskUrls(config, taskId, options).catch(() => urls);
+        }
+        if (urls.length > 0) {
+            try {
+                const response = await fetch(urls[0], { signal: options?.signal });
+                if (response.ok) {
+                    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+                    if (!/(json|html|text\/plain)/i.test(contentType)) {
+                        const blob = await response.blob();
+                        if (blob.size >= 256 && !/(json|html)/i.test(blob.type || "")) {
+                            return blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/png" });
+                        }
+                    }
+                }
+            } catch (error) {
+                if (isAbortError(error)) throw error;
+            }
+        }
+        if (attempt < DOWNLOAD_RETRY_BACKOFFS.length) {
+            await waitMs(DOWNLOAD_RETRY_BACKOFFS[attempt], options?.signal);
+        }
+    }
+    throw new Error(apiText("imageGenerationFailed"));
 }
 
 /**
@@ -959,19 +1060,19 @@ async function runImageTaskIfNeeded(requestConfig: AiConfig, prompt: string, ref
     const taskId = await createImageTask(requestConfig, body, options);
     imageTaskObserver?.(taskId, requestConfig.model);
     const urls = await waitForImageTask(requestConfig, taskId, options);
-    const blob = await (await fetch(urls[0])).blob();
+    const blob = await downloadTaskImageBlob(requestConfig, taskId, urls, options);
     const dataUrl = await readFileAsDataUrl(new File([blob], "image.png", { type: blob.type || "image/png" }));
     return [{ id: nanoid(), dataUrl }];
 }
 
-/** 用登录会话调 /api（和画柚其它管理接口同一套认证，避开 /v1/tasks 的令牌校验）。 */
+/** 用登录会话调 /api（走 axios requiresAuth 自动无感续期与 401 重放，避免轮询到第 15 分钟突然 401 失败）。 */
 async function sessionApi<T>(path: string, options?: RequestOptions): Promise<T> {
     const { session } = useUserStore.getState();
     const base = (session?.baseUrl || "").replace(/\/$/, "");
-    const response = await fetch(`${base}${path}`, {
-        headers: { Authorization: `Bearer ${session?.token || ""}` },
+    const response = await axios.get<T>(`${base}${path}`, {
+        headers: session?.token ? { Authorization: `Bearer ${session.token}` } : undefined,
         signal: options?.signal,
+        requiresAuth: true,
     });
-    if (!response.ok) throw new Error(apiText("requestFailed"));
-    return (await response.json()) as T;
+    return response.data;
 }

@@ -12,8 +12,8 @@ export const NO_TEXT_RULE = "画面中不要出现任何文字：不要标题、
 /** 场景图：只要单一空景环境，不要人物、多宫格或拼接。 */
 export const SCENE_RULE = "严格输出单一完整画面：仅构图一张空场景全貌环境图，严禁多宫格、拼图、分屏、多角度视图、局部放大框、文字标注或框线分隔；只表现场景环境本身，画面中不要出现任何人物、人体、面部、手部或动物，构图留有主体活动空间，方便后续合成。";
 
-/** 物品图：只要这一件物品的单一视角静物主图，严禁三视图/细节框/电商排版拼接图。 */
-export const ITEM_RULE = "严格输出单一物品静物主图：画面中仅展示这一件完整物品的单个立体视角（斜正面单一角度），严禁生成三视图/四视图/正面侧面背面多视角拼图，严禁出现放大细节框、结构拆解图、剖面图、电商卖点排版图或分栏格子；纯色或极简素净桌面背景，主体清晰完整无遮挡，不要出现人物、手部、动物、其他无关物品，也不要出现任何汉字、英文标签、标注框、花字或品牌文字。";
+/** 物品图：纯白无缝无背景的单一孤立物品主图，严禁场景背景与多视图/细节框拼图。 */
+export const ITEM_RULE = "严格输出纯白无背景的单一物品孤立主体图（isolated object on pure solid white #FFFFFF seamless background）：画面中仅展示这一件完整物品的单个立体视角（斜正面单一角度），主体居中完整无裁切、无遮挡；纯白无缝纯色背景，严禁任何环境背景、桌面、地面、墙面、房间布景、展示台、地平线、倒影和重投影，不要出现人物、手部、动物或其他无关陪衬物品；同时严禁生成三视图/四视图/正面侧面背面多视角拼图、放大细节框、结构拆解图、剖面图或电商排版格子。";
 
 export type CharacterPromptInput = {
     /** 角色名 */
@@ -139,13 +139,14 @@ export function sceneImagePrompt({ name, description, filmStyle, spaceContext }:
     return lines.join("\n");
 }
 
-/** 物品生图提示词：单一角度商品/道具主图（不走人物设定模板），显式禁止多视图/细节框/卖点字样。 */
+/** 物品生图提示词：纯白无缝无背景的单一孤立物品主图（跟人物资产图保持一致的纯色无背景规范），严禁场景背景与多视图拼图。 */
 export function itemImagePrompt({ name, description, filmStyle }: ItemPromptInput): string {
     const lines = [
         ITEM_RULE,
         `物品名称：${name}`,
-        description ? `外观材质描述：${description}` : "",
-        filmStyle ? `光影质感参考：${filmStyle}` : "",
+        description ? `物品本体外观与材质（只画物品本体，忽略其所处环境、桌面或陈设）：${description}` : "",
+        filmStyle ? `仅参考画风与材质写实度（严禁带入任何室内外环境、桌面或背景物体）：${filmStyle}` : "",
+        "背景规范：100% 纯白无缝纯色背景，无环境、无桌面、无地面线、无投影、无展示台，正面柔和均匀打光，边缘干净利落。",
         NO_TEXT_RULE,
     ].filter(Boolean);
     return lines.join("\n");

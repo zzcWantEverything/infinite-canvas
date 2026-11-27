@@ -5,7 +5,7 @@ import { Group, MousePointerClick, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
-import { createImageTask, requestEdit, requestGeneration, requestImageQuestion, setImageTaskObserver, waitForImageTask } from "@/services/api/image";
+import { createImageTask, downloadTaskImageBlob, requestEdit, requestGeneration, requestImageQuestion, setImageTaskObserver, waitForImageTask } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, pollVideoGenerationTask, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -709,7 +709,7 @@ function InfiniteCanvasPage() {
                 resumingImageTasksRef.current.add(key);
                 try {
                     const urls = await waitForImageTask(generationConfig, item.taskId as string);
-                    const blob = await (await fetch(urls[0])).blob();
+                    const blob = await downloadTaskImageBlob(generationConfig, item.taskId as string, urls);
                     const uploaded = await uploadImage(blob);
                     const size = nodeSizeByWidth(uploaded.width, uploaded.height);
                     setNodes((prev) =>
@@ -767,7 +767,7 @@ function InfiniteCanvasPage() {
             try {
                 const generationConfig = buildGenerationConfig(effectiveConfig, node, "image");
                 const urls = await waitForImageTask(generationConfig, taskId);
-                const blob = await (await fetch(urls[0])).blob();
+                const blob = await downloadTaskImageBlob(generationConfig, taskId, urls);
                 const uploaded = await uploadImage(blob);
                 const size = nodeSizeByWidth(uploaded.width, uploaded.height);
                 forceCloudPushRef.current = true;
@@ -815,7 +815,7 @@ function InfiniteCanvasPage() {
                 resumingImageTasksRef.current.add(key);
                 try {
                     const urls = await waitForImageTask(generationConfig, item.taskId);
-                    const blob = await (await fetch(urls[0])).blob();
+                    const blob = await downloadTaskImageBlob(generationConfig, item.taskId, urls);
                     const uploaded = await uploadImage(blob);
                     const size = nodeSizeByWidth(uploaded.width, uploaded.height);
                     setNodes((prev) =>
@@ -2941,7 +2941,7 @@ function InfiniteCanvasPage() {
                                         ),
                                     );
                                     const urls = await waitForImageTask(generationConfig, taskId, { signal: controller.signal });
-                                    const blob = await (await fetch(urls[0])).blob();
+                                    const blob = await downloadTaskImageBlob(generationConfig, taskId, urls, { signal: controller.signal });
                                     uploaded = await uploadImage(blob);
                                 } else {
                                     const image = referenceImages.length
