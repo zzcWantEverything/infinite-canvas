@@ -647,6 +647,10 @@ export default {
         changelogFailed: "更新日志读取失败",
         updated: "已获取最新版本信息",
         updateFailed: "获取最新版本信息失败",
+        updateToastTitle: "发现新版本，点击更新",
+        updateToastDesc: "为保留当前输入和操作，暂不自动刷新。",
+        updateToastAction: "更新",
+        updating: "更新中...",
         types: { added: "新增", fixed: "修复", changed: "调整", optimized: "优化", docs: "文档" },
     },
     config: {

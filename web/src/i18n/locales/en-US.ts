@@ -647,6 +647,10 @@ export default {
         changelogFailed: "Failed to read changelog",
         updated: "Latest version information loaded",
         updateFailed: "Failed to load the latest version information",
+        updateToastTitle: "New version available",
+        updateToastDesc: "Auto-refresh is paused to preserve your current input and work.",
+        updateToastAction: "Update",
+        updating: "Updating…",
         types: { added: "Added", fixed: "Fixed", changed: "Changed", optimized: "Optimized", docs: "Docs" },
     },
     config: {

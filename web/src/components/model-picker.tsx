@@ -44,6 +44,13 @@ async function loadCachedUserModels(baseUrl: string, token: string): Promise<str
     return promise;
 }
 
+export function invalidateUserModelsCache() {
+    cachedModelsKey = "";
+    cachedModels = null;
+    cachedModelsAt = 0;
+    inflightModels = null;
+}
+
 type ModelPickerProps = {
     config: AiConfig;
     value?: string;

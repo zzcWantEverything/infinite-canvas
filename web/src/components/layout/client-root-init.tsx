@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
+import { AppUpdateBanner } from "@/components/layout/app-update-banner";
 import { setApiErrorNotifier } from "@/services/api/http";
 import { repairChannelCredentials, validateSession } from "@/services/api/session";
 
@@ -52,5 +53,10 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         else message.error(t("config.importedChannelBaseUrlInvalid"));
     }, [importChannelCredentials, message, t]);
 
-    return <>{children}</>;
+    return (
+        <>
+            {children}
+            <AppUpdateBanner />
+        </>
+    );
 }
