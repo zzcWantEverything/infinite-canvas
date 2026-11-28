@@ -163,10 +163,17 @@ export function fetchModelCatalog(baseUrl: string, token: string, options?: { fo
     return inflight;
 }
 
+function bareModelName(model: string): string {
+    const value = (model || "").trim();
+    const sep = value.indexOf("::");
+    return sep >= 0 ? value.slice(sep + 2).trim() : value;
+}
+
 /** 同步读取缓存里的变体；目录还没拉到时返回 null，调用方回退到内置表。 */
 export function catalogVariant(model: string): CatalogVariant | null {
     if (!variantIndex) return null;
-    return variantIndex.get(model) ?? null;
+    const key = bareModelName(model);
+    return key ? (variantIndex.get(key) ?? null) : null;
 }
 
 /** 读取目录缓存里按次限量的剩余份数（未限量或未知返回 null，保留 0 份）。 */
@@ -194,7 +201,8 @@ export function refreshModelCatalogIfStale(baseUrl: string, token: string, maxAg
  */
 export function catalogGroupOf(model: string): CatalogGroup | null {
     if (!groupIndex) return null;
-    return groupIndex.get(model) ?? null;
+    const key = bareModelName(model);
+    return key ? (groupIndex.get(key) ?? null) : null;
 }
 
 /** 切换账号或后台改了模型配置后需要重取。 */

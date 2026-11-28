@@ -129,27 +129,43 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 
 export function hasResumableVideoTask(node: CanvasNodeData) {
     if (node.metadata?.content) return false;
-    if (node.type === CanvasNodeType.Video) return Boolean(node.metadata?.videoTaskId);
-    return node.type === CanvasNodeType.Image && Boolean(node.metadata?.imageTaskId);
+    return node.type === CanvasNodeType.Video && Boolean(node.metadata?.videoTaskId);
+}
+
+export function hasResumableImageTask(node: CanvasNodeData) {
+    if (node.type !== CanvasNodeType.Image) return false;
+    if (!node.metadata?.content && Boolean(node.metadata?.imageTaskId)) return true;
+    return Boolean(node.metadata?.images?.some((item) => Boolean(item.taskId) && item.status === "loading"));
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading"
-            ? hasResumableVideoTask(node)
-                ? node
-                : {
-                      ...node,
-                      metadata: {
-                          ...node.metadata,
-                          status: "error" as const,
-                          errorDetails: i18n.t("canvas.generation.interrupted"),
-                          images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
-                          texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
-                      },
-                  }
-            : node,
-    );
+    return nodes.map((node) => {
+        if (node.metadata?.status !== "loading") return node;
+        if (hasResumableVideoTask(node)) return node;
+        if (hasResumableImageTask(node)) {
+            return {
+                ...node,
+                metadata: {
+                    ...node.metadata,
+                    images: node.metadata.images?.map((image) =>
+                        image.status === "loading" && !image.taskId
+                            ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") }
+                            : image,
+                    ),
+                },
+            };
+        }
+        return {
+            ...node,
+            metadata: {
+                ...node.metadata,
+                status: "error" as const,
+                errorDetails: i18n.t("canvas.generation.interrupted"),
+                images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
+                texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
+            },
+        };
+    });
 }
 
 export function isGenerationCanceled(error: unknown) {

@@ -98,7 +98,10 @@ type GeminiPayload = {
     promptFeedback?: { blockReason?: string };
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = {
+    signal?: AbortSignal;
+    onTaskCreated?: (taskId: string, model: string) => void;
+};
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -204,6 +207,28 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     }
     if (value.includes(":")) return resolveSize(quality, value);
     throw new Error(apiText("invalidImageSizeFormat"));
+}
+
+function resolveTaskImageSize(size: string | undefined): string | undefined {
+    const value = (size || "").trim();
+    if (!value || value.toLowerCase() === "auto") return undefined;
+    const dimensions = parseImageDimensions(value);
+    if (dimensions && dimensions.width > 0 && dimensions.height > 0) {
+        return `${dimensions.width}x${dimensions.height}`;
+    }
+    if (!value.includes(":")) return undefined;
+    const preset = imageSizePresets["1k"]?.[value];
+    if (preset) return preset;
+    try {
+        const parsed = parseRatioValue(value);
+        const ratio = parsed.width / parsed.height;
+        const area = DEFAULT_IMAGE_SHORT_SIDE * DEFAULT_IMAGE_SHORT_SIDE;
+        const width = Math.max(IMAGE_SIZE_STEP, Math.floor(Math.sqrt(area * ratio) / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP);
+        const height = Math.max(IMAGE_SIZE_STEP, Math.floor(Math.sqrt(area / ratio) / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP);
+        return `${width}x${height}`;
+    } catch {
+        return undefined;
+    }
 }
 
 function resolveGeminiImageConfig(config: AiConfig) {
@@ -895,6 +920,12 @@ export interface ImageTaskState {
     error?: string;
 }
 
+const IMAGE_TASK_FAILED_ERROR = "ImageTaskFailedError";
+
+export function isImageTaskFailed(error: unknown): error is Error {
+    return error instanceof Error && error.name === IMAGE_TASK_FAILED_ERROR;
+}
+
 function isAbortError(error: unknown) {
     return (error instanceof DOMException && error.name === "AbortError") || axios.isCancel(error);
 }
@@ -964,7 +995,9 @@ export async function pollImageTask(config: AiConfig, taskId: string, options?: 
 /** 取任务产物地址（已把网关自报的主机改写成当前站点）。 */
 export async function fetchImageTaskUrls(config: AiConfig, taskId: string, options?: RequestOptions): Promise<string[]> {
     const body = await sessionApi<{ data?: { artifacts?: { type?: string; content_url?: string }[] } }>(`/api/task/${encodeURIComponent(taskId)}/artifacts`, options);
-    const origin = new URL(config.baseUrl).origin;
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    const baseUrl = requestConfig.baseUrl?.trim() || (typeof window !== "undefined" ? window.location.origin : "");
+    const origin = new URL(baseUrl).origin;
     return (body?.data?.artifacts || [])
         .filter((item) => (item.type || "").toLowerCase() === "image" && item.content_url)
         .map((item) => {
@@ -993,7 +1026,11 @@ export async function waitForImageTask(config: AiConfig, taskId: string, options
             continue;
         }
         transientErrors = 0;
-        if (state.status === "failed") throw new Error(readFailureMessage(state.error, apiText("imageGenerationFailed")));
+        if (state.status === "failed") {
+            const failedError = new Error(readFailureMessage(state.error, apiText("imageGenerationFailed")));
+            failedError.name = IMAGE_TASK_FAILED_ERROR;
+            throw failedError;
+        }
         if (state.status === "success") {
             for (let attempt = 0; attempt < 3; attempt += 1) {
                 try {
@@ -1051,14 +1088,16 @@ export async function downloadTaskImageBlob(config: AiConfig, taskId: string, in
 async function runImageTaskIfNeeded(requestConfig: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     if (catalogVariant(requestConfig.model)?.capabilities?.invocation !== "task") return null;
     const images = (await Promise.all(references.map((item) => imageToDataUrl(item)))).filter(Boolean);
+    const taskSize = resolveTaskImageSize(requestConfig.size);
     const body = {
         model: requestConfig.model,
         prompt: withSystemPrompt(requestConfig, prompt),
-        ...(requestConfig.size ? { size: requestConfig.size } : {}),
+        ...(taskSize ? { size: taskSize } : {}),
         ...(images.length ? { images } : {}),
     };
     const taskId = await createImageTask(requestConfig, body, options);
-    imageTaskObserver?.(taskId, requestConfig.model);
+    if (options?.onTaskCreated) options.onTaskCreated(taskId, requestConfig.model);
+    else imageTaskObserver?.(taskId, requestConfig.model);
     const urls = await waitForImageTask(requestConfig, taskId, options);
     const blob = await downloadTaskImageBlob(requestConfig, taskId, urls, options);
     const dataUrl = await readFileAsDataUrl(new File([blob], "image.png", { type: blob.type || "image/png" }));
