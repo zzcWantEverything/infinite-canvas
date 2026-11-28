@@ -1,21 +1,27 @@
 import { Button, Modal } from "antd";
 import { useTranslation } from "react-i18next";
 
+import { deleteProjectsFromCloud } from "@/services/canvas-cloud-sync";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function CanvasDeleteProjectsDialog() {
     const { t } = useTranslation();
+    const session = useUserStore((state) => state.session);
     const ids = useCanvasUiStore((state) => state.deleteProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
     const removeSelectedIds = useCanvasUiStore((state) => state.removeSelectedProjectIds);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const cleanupImages = useAssetStore((state) => state.cleanupImages);
+    const account = session?.user?.display_name || session?.user?.username || "-";
     const confirm = () => {
-        deleteProjects(ids);
+        const removingIds = [...ids];
+        deleteProjects(removingIds);
+        void deleteProjectsFromCloud(removingIds);
         cleanupImages();
-        removeSelectedIds(ids);
+        removeSelectedIds(removingIds);
         setDeleteIds([]);
     };
 
@@ -34,7 +40,7 @@ export function CanvasDeleteProjectsDialog() {
                 </>
             }
         >
-            <p className="text-sm text-stone-500">{t("canvas.project.deleteDescription", { count: ids.length })}</p>
+            <p className="text-sm text-stone-500">{t("canvas.project.deleteDescription", { count: ids.length, account })}</p>
         </Modal>
     );
 }

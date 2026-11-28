@@ -2,6 +2,10 @@ import { BookOpen, Clapperboard, FileText, Image as ImageIcon, Images, Maximize2
 
 export const navigationTools = [
     {
+        slug: "canvas",
+        icon: Maximize2,
+    },
+    {
         slug: "image",
         icon: ImageIcon,
     },
@@ -12,10 +16,6 @@ export const navigationTools = [
     {
         slug: "copy",
         icon: Clapperboard,
-    },
-    {
-        slug: "canvas",
-        icon: Maximize2,
     },
     {
         slug: "novel",

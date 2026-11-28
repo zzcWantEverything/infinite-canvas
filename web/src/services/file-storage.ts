@@ -1,7 +1,7 @@
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 
-import { getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, trackCloudUpload, uploadToCloud } from "@/services/canvas-cloud";
+import { currentCloudUserId, getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, trackCloudUpload, uploadToCloud } from "@/services/canvas-cloud";
 import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
@@ -105,7 +105,8 @@ function mediaKindFromPrefix(prefix: string) {
 
 // 上传成功后把 storageKey -> objectKey 的映射落盘，供跨设备回放。
 async function syncMediaToCloud(storageKey: string, blob: Blob, prefix: string, meta: { width?: number; height?: number; durationMs?: number }) {
-    if (!isCloudEnabled()) return;
+    const uid = currentCloudUserId();
+    if (!uid || !isCloudEnabled()) return;
     try {
         const objectKey = await uploadToCloud(blob, mediaKindFromPrefix(prefix), blob.type || "application/octet-stream", {
             width: meta.width,
@@ -113,7 +114,7 @@ async function syncMediaToCloud(storageKey: string, blob: Blob, prefix: string, 
             duration_ms: meta.durationMs,
             local_key: storageKey,
         });
-        await recordObjectKey(storageKey, objectKey);
+        await recordObjectKey(storageKey, objectKey, uid);
     } catch {
         // 上传失败不打断使用：本地 blob 仍在，下次上传新素材时再补传。
     }

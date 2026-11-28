@@ -8,12 +8,16 @@ import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
 import { AppUpdateBanner } from "@/components/layout/app-update-banner";
 import { setApiErrorNotifier } from "@/services/api/http";
 import { repairChannelCredentials, validateSession } from "@/services/api/session";
+import { switchCanvasSessionUser } from "@/services/canvas-cloud-sync";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const handledConfigParams = useRef(false);
     const importChannelCredentials = useConfigStore((state) => state.importChannelCredentials);
+    const userHydrated = useUserStore((state) => state.hydrated);
+    const currentUserId = useUserStore((state) => state.session?.user?.id ?? null);
 
     usePromptSourceScheduler();
 
@@ -33,6 +37,12 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     useEffect(() => {
         void repairChannelCredentials();
     }, []);
+
+    // 会话加载/登录/切号/登出时，严格按 userId 切换本地画布与同步状态。
+    useEffect(() => {
+        if (!userHydrated) return;
+        void switchCanvasSessionUser(currentUserId);
+    }, [currentUserId, userHydrated]);
 
     useEffect(() => {
         if (handledConfigParams.current) return;

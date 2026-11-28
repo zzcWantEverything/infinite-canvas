@@ -23,6 +23,7 @@ export default function CanvasPage() {
     const [searchParams] = useSearchParams();
     const inputRef = useRef<HTMLInputElement>(null);
     const autoOpenRef = useRef(false);
+    const activeUserId = useCanvasStore((state) => state.activeUserId);
     const hydrated = useCanvasStore((state) => state.hydrated);
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
@@ -72,10 +73,10 @@ export default function CanvasPage() {
     };
 
     useEffect(() => {
-        if (!hydrated) return;
+        if (!hydrated || !activeUserId) return;
         // 进入画布库时从云端拉一次，把其它设备保存的画布并进来。
-        void pullCloudToLocal();
-    }, [hydrated]);
+        void pullCloudToLocal(activeUserId);
+    }, [activeUserId, hydrated]);
 
     useEffect(() => {
         if (!hydrated || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;

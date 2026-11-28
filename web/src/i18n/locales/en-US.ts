@@ -307,7 +307,7 @@ export default {
         project: {
             untitled: "Untitled canvas", imported: "Imported canvas",
             select: "Select {{name}}", stats: "{{nodes}} nodes · {{connections}} connections", updated: "Updated {{date}}", saveName: "Save name", cancelRename: "Cancel rename", export: "Export", rename: "Rename", delete: "Delete",
-            deleteTitle: "Delete canvases?", deleteDescription: "This will delete {{count}} canvases along with their nodes and connections.",
+            deleteTitle: "Delete canvases?", deleteDescription: "This will delete {{count}} canvases (both cloud and local) for account “{{account}}”, along with their nodes and connections.",
         },
         export: { defaultProjectName: "画柚", defaultNodesName: "Canvas elements", item: "Element" },
         createMenu: {

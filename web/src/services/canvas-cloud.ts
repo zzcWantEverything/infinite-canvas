@@ -8,9 +8,9 @@ import { useUserStore } from "@/stores/use-user-store";
  *
  * 存储约定：
  * - 本地 storageKey（video:xxx / image:xxx）只作本地 IndexedDB 缓存键；
- * - 上传成功后映射到 COS objectKey（media/{uid}/...），映射存 cloud_media_map；
- * - 画布 doc 推送到云端时，把 storageKey 替换成 objectKey；拉回时字段仍是
- *   objectKey，渲染层按 "media/" 前缀识别并换签名地址。
+ * - 上传成功后映射到 COS objectKey（media/{uid}/...），映射按 userId 分区存 cloud_media_map；
+ * - 画布 doc 推送到云端时，若仍有未映射的本地键会尝试从本地 IndexedDB 补传后替换成 objectKey；
+ * - 拉回时字段仍是 objectKey，渲染层按 "media/" 前缀识别并换签名地址。
  */
 
 export type PresignResult = {
@@ -38,11 +38,23 @@ type MediaMeta = {
     height?: number;
     duration_ms?: number;
     project_id?: string;
-    /** 本地上传键（video:xxx）。登记到服务端后，换设备也能把历史文档里的本地键对回云端文件。 */
+    /** 本地上传键（video:xxx / image:xxx）。登记到服务端后，换设备也能把历史文档里的本地键对回云端文件。 */
     local_key?: string;
 };
 
 const cloudMap = localforage.createInstance({ name: "infinite-canvas", storeName: "cloud_media_map" });
+const syncMediaCache = new Map<string, string>();
+const inflightBackfills = new Map<string, Promise<string | null>>();
+
+const ALLOWED_CANVAS_MIMES: Record<"image" | "video" | "audio", Set<string>> = {
+    image: new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]),
+    video: new Set(["video/mp4", "video/webm", "video/quicktime"]),
+    audio: new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/ogg"]),
+};
+
+export function currentCloudUserId(): number | null {
+    return useUserStore.getState().session?.user?.id ?? null;
+}
 
 export function isCloudEnabled() {
     return Boolean(useUserStore.getState().session?.token);
@@ -121,8 +133,12 @@ let pendingBatchWaiters: Array<{
 let pendingBatchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function currentUserCachePrefix() {
-    const uid = useUserStore.getState().session?.user?.id;
+    const uid = currentCloudUserId();
     return `${uid ?? 0}:`;
+}
+
+export function clearSignedUrlCache() {
+    signedUrlCache.clear();
 }
 
 async function flushSignedUrlBatch() {
@@ -186,20 +202,54 @@ export async function getCloudMediaUrls(keys: string[]): Promise<Record<string, 
     return { ...result, ...fetched };
 }
 
-// ===== 本地 storageKey -> objectKey 映射 =====
+// ===== 本地 storageKey -> objectKey 映射（按 userId 分区隔离） =====
 
-async function localObjectKeyFor(localKey: string): Promise<string | null> {
-    return cloudMap.getItem<string>(localKey).catch(() => null);
+function mediaMapKey(userId: number, localKey: string) {
+    return `u:${userId}:${localKey}`;
+}
+
+function isOwnedObjectKey(objectKey: string | null | undefined, userId: number): objectKey is string {
+    return Boolean(objectKey && objectKey.startsWith(`media/${userId}/`));
+}
+
+export function getCachedObjectKeySync(localKey: string, userId = currentCloudUserId()): string | null {
+    if (!userId || !localKey) return null;
+    return syncMediaCache.get(mediaMapKey(userId, localKey)) ?? null;
+}
+
+async function localObjectKeyFor(localKey: string, userId = currentCloudUserId()): Promise<string | null> {
+    if (!userId || !localKey) return null;
+    const scopedKey = mediaMapKey(userId, localKey);
+    const mem = syncMediaCache.get(scopedKey);
+    if (isOwnedObjectKey(mem, userId)) return mem;
+    const scoped = await cloudMap.getItem<string>(scopedKey).catch(() => null);
+    if (isOwnedObjectKey(scoped, userId)) {
+        syncMediaCache.set(scopedKey, scoped);
+        return scoped;
+    }
+    // 兼容历史未分区的 cloud_media_map：只采信 objectKey 前缀确实属于当前 userId 的条目并迁移。
+    const legacy = await cloudMap.getItem<string>(localKey).catch(() => null);
+    if (isOwnedObjectKey(legacy, userId)) {
+        syncMediaCache.set(scopedKey, legacy);
+        await cloudMap.setItem(scopedKey, legacy).catch(() => undefined);
+        return legacy;
+    }
+    return null;
 }
 
 export async function objectKeyFor(localKey: string): Promise<string | null> {
-    const cached = await localObjectKeyFor(localKey);
+    const uid = currentCloudUserId();
+    if (!uid) return null;
+    const cached = await localObjectKeyFor(localKey, uid);
     if (cached) return cached;
     // 本地映射丢了（换设备 / 换浏览器）：问服务端，历史画布的本地键靠这一步找回云端文件。
     const remote = await fetchMediaKeys([localKey]).catch((): Record<string, string> => ({}));
-    const objectKey = remote[localKey] || null;
-    if (objectKey) await cloudMap.setItem(localKey, objectKey).catch(() => undefined);
-    return objectKey;
+    const objectKey = remote[localKey];
+    if (isOwnedObjectKey(objectKey, uid)) {
+        await recordObjectKey(localKey, objectKey, uid);
+        return objectKey;
+    }
+    return null;
 }
 
 /** 批量按本地键查云端 object_key。只返回当前用户名下登记过的。 */
@@ -209,8 +259,96 @@ export async function fetchMediaKeys(localKeys: string[]): Promise<Record<string
     return data.keys || {};
 }
 
-export async function recordObjectKey(localKey: string, objectKey: string) {
-    await cloudMap.setItem(localKey, objectKey).catch(() => undefined);
+export async function recordObjectKey(localKey: string, objectKey: string, userId = currentCloudUserId()) {
+    if (!userId || !localKey || !isOwnedObjectKey(objectKey, userId)) return;
+    const scopedKey = mediaMapKey(userId, localKey);
+    syncMediaCache.set(scopedKey, objectKey);
+    await cloudMap.setItem(scopedKey, objectKey).catch(() => undefined);
+}
+
+function normalizeCloudMedia(localKey: string, blob: Blob): { kind: string; mimeType: string } {
+    const prefix = localKey.split(":")[0] || "";
+    const baseKind =
+        prefix === "image"
+            ? "image"
+            : prefix === "video" || prefix === "video-reference"
+              ? "video"
+              : prefix === "audio" || prefix === "audio-reference"
+                ? "audio"
+                : "file";
+
+    let mime = (blob.type || "").split(";")[0].trim().toLowerCase();
+    if (mime === "image/jpg") mime = "image/jpeg";
+    else if (mime === "audio/mp3") mime = "audio/mpeg";
+    else if (mime === "audio/x-wav") mime = "audio/wav";
+
+    if (baseKind === "file") {
+        return { kind: "file", mimeType: mime || "application/octet-stream" };
+    }
+    if (ALLOWED_CANVAS_MIMES[baseKind].has(mime)) {
+        return { kind: baseKind, mimeType: mime };
+    }
+    if (!mime || mime === "application/octet-stream") {
+        const fallbackMime = baseKind === "image" ? "image/png" : baseKind === "video" ? "video/mp4" : "audio/mpeg";
+        return { kind: baseKind, mimeType: fallbackMime };
+    }
+    return { kind: "file", mimeType: mime };
+}
+
+async function backfillSingleLocalKey(localKey: string, userId: number): Promise<string | null> {
+    const flightKey = mediaMapKey(userId, localKey);
+    const existing = inflightBackfills.get(flightKey);
+    if (existing) return existing;
+
+    const task = (async () => {
+        try {
+            if (currentCloudUserId() !== userId) return null;
+            let blob: Blob | null = null;
+            if (localKey.startsWith("image:")) {
+                const { getImageBlob } = await import("@/services/image-storage");
+                blob = await getImageBlob(localKey);
+            } else {
+                const { getMediaBlob } = await import("@/services/file-storage");
+                blob = await getMediaBlob(localKey);
+            }
+            if (!blob || blob.size <= 0 || currentCloudUserId() !== userId) return null;
+            const { kind, mimeType } = normalizeCloudMedia(localKey, blob);
+            const objectKey = await uploadToCloud(blob, kind, mimeType, { local_key: localKey });
+            if (!isOwnedObjectKey(objectKey, userId) || currentCloudUserId() !== userId) return null;
+            await recordObjectKey(localKey, objectKey, userId);
+            return objectKey;
+        } catch {
+            return null;
+        } finally {
+            inflightBackfills.delete(flightKey);
+        }
+    })();
+
+    inflightBackfills.set(flightKey, task);
+    return task;
+}
+
+/** 对文档中缺失云端映射的本地素材键，从本机 IndexedDB 补传 COS 并登记 local_key。 */
+async function backfillLocalStorageKeys(localKeys: string[], userId: number): Promise<Record<string, string>> {
+    const unique = [...new Set(localKeys)].filter((k) => Boolean(k) && !k.startsWith("media/") && !k.startsWith("data:"));
+    if (!unique.length || currentCloudUserId() !== userId) return {};
+
+    const results: Record<string, string> = {};
+    let nextIndex = 0;
+    const workers = Math.min(3, unique.length);
+    await Promise.all(
+        Array.from({ length: workers }, async () => {
+            while (nextIndex < unique.length) {
+                const key = unique[nextIndex++];
+                if (currentCloudUserId() !== userId) return;
+                const objectKey = await backfillSingleLocalKey(key, userId);
+                if (objectKey && isOwnedObjectKey(objectKey, userId)) {
+                    results[key] = objectKey;
+                }
+            }
+        }),
+    );
+    return results;
 }
 
 // ===== 画布项目 =====
@@ -249,6 +387,30 @@ export async function saveCloudProject(id: string, title: string, doc: string, r
     return { conflict: false, project: payload.data?.project };
 }
 
+/** 关页/切走时的 keepalive PUT，防止 1.5s 防抖窗口未 flush 就关闭浏览器丢失最后几笔。 */
+export function saveCloudProjectKeepalive(id: string, title: string, doc: string, revision: number): boolean {
+    const token = useUserStore.getState().session?.token;
+    if (!token) return false;
+    const body = JSON.stringify({ title, doc, revision });
+    // 浏览器 keepalive 请求体上限通常约 64KB，超限交给普通请求或 localStorage/IndexedDB。
+    if (body.length > 60_000) return false;
+    try {
+        void fetch(apiUrl(`/api/canvas/projects/${id}`), {
+            method: "PUT",
+            keepalive: true,
+            credentials: "include",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            },
+            body,
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 export async function deleteCloudProject(id: string) {
     await api("DELETE", `/api/canvas/projects/${id}`);
 }
@@ -276,7 +438,7 @@ async function rewriteStorageKeys<T>(value: T, mapper: (key: string) => Promise<
 }
 
 /** 收集结构里所有 storageKey（同步）。 */
-function collectStorageKeys(value: unknown, out: Set<string>) {
+export function collectStorageKeys(value: unknown, out: Set<string>) {
     if (Array.isArray(value)) {
         for (const item of value) collectStorageKeys(item, out);
         return;
@@ -290,61 +452,112 @@ function collectStorageKeys(value: unknown, out: Set<string>) {
 }
 
 /**
- * 把本地画布对象序列化成云端 doc：storageKey 有映射就替换成 objectKey。
- * 先收集所有本地键、批量问服务端一次（换设备时本地映射为空，靠服务端兜底），
- * 避免每个 storageKey 都打一次接口。
+ * 把本地画布对象序列化成云端 doc：
+ * 1) 查当前账号的本地 cloud_media_map
+ * 2) 批量问服务端 /api/canvas/media/keys
+ * 3) 对仍无映射的本地键尝试从 IndexedDB 补传 COS 后替换成 objectKey
  */
 export async function serializeDoc(project: { [key: string]: unknown }): Promise<string> {
+    const uid = currentCloudUserId();
+    if (!uid) return JSON.stringify(project);
+
     const all = new Set<string>();
     collectStorageKeys(project, all);
-    const pending = [...all].filter((key) => !key.startsWith("media/") && !key.startsWith("data:"));
-    const remoteKeys = await fetchMediaKeys(pending).catch((): Record<string, string> => ({}));
+    const pending = [...all].filter((key) => Boolean(key) && !key.startsWith("media/") && !key.startsWith("data:"));
+    const resolved = new Map<string, string>();
+
+    const needRemote: string[] = [];
+    for (const key of pending) {
+        const local = await localObjectKeyFor(key, uid);
+        if (local) resolved.set(key, local);
+        else needRemote.push(key);
+    }
+
+    if (needRemote.length) {
+        const remoteKeys = await fetchMediaKeys(needRemote).catch((): Record<string, string> => ({}));
+        for (const key of needRemote) {
+            const objKey = remoteKeys[key];
+            if (isOwnedObjectKey(objKey, uid)) {
+                resolved.set(key, objKey);
+                await recordObjectKey(key, objKey, uid);
+            }
+        }
+    }
+
+    const needBackfill = needRemote.filter((key) => !resolved.has(key));
+    if (needBackfill.length && currentCloudUserId() === uid) {
+        const uploaded = await backfillLocalStorageKeys(needBackfill, uid);
+        for (const [key, objKey] of Object.entries(uploaded)) {
+            if (isOwnedObjectKey(objKey, uid)) resolved.set(key, objKey);
+        }
+    }
+
     const rewritten = await rewriteStorageKeys(project, async (key) => {
-        if (key.startsWith("media/") || key.startsWith("data:")) return key;
-        const objectKey = (await localObjectKeyFor(key)) || remoteKeys[key];
-        if (objectKey) await cloudMap.setItem(key, objectKey).catch(() => undefined);
-        return objectKey || key;
+        if (!key || key.startsWith("media/") || key.startsWith("data:")) return key;
+        return resolved.get(key) || key;
     });
     return JSON.stringify(rewritten);
 }
 
 /**
- * 打开画布时修复云端文档里残留的本地键：历史文档存的是 video:xxx / image:xxx，
- * 换设备后靠服务端映射把它们改写成 object_key 并重推，文档从此不再依赖本地映射。
- * 返回是否真的改写了。
+ * 打开或拉取画布时修复云端文档里残留的本地键：
+ * 依次尝试服务端 local_key 映射、本地 cloud_media_map、以及从当前浏览器的 IndexedDB 补传 COS。
+ * 只有确实改写了至少 1 个本地键才会保存新版本。
  */
 export async function repairCloudProjectMediaKeys(cloudProjectId: string, prefetched?: CloudProject | null): Promise<CloudProject | null> {
+    const uid = currentCloudUserId();
+    if (!uid) return prefetched ?? null;
+
     const project = prefetched ?? (await getCloudProject(cloudProjectId));
-    if (!project) return null;
+    if (!project || currentCloudUserId() !== uid) return project;
     let doc: unknown;
     try {
         doc = JSON.parse(project.doc || "{}");
     } catch {
         return project;
     }
+
     const all = new Set<string>();
     collectStorageKeys(doc, all);
-    const pending = [...all].filter((key) => !key.startsWith("media/") && !key.startsWith("data:"));
+    const pending = [...all].filter((key) => Boolean(key) && !key.startsWith("media/") && !key.startsWith("data:"));
     if (!pending.length) return project;
+
+    const resolved = new Map<string, string>();
     const remoteKeys = await fetchMediaKeys(pending).catch((): Record<string, string> => ({}));
-    // 原浏览器首次修复时，服务端还没登记 local_key（历史数据），本地 cloud_media_map 才是有的那份，优先用它。
     for (const key of pending) {
-        if (remoteKeys[key]) continue;
-        const local = await localObjectKeyFor(key);
-        if (local) remoteKeys[key] = local;
+        const objKey = remoteKeys[key];
+        if (isOwnedObjectKey(objKey, uid)) {
+            resolved.set(key, objKey);
+            await recordObjectKey(key, objKey, uid);
+        }
     }
-    if (!Object.keys(remoteKeys).length) return project;
+
+    const needLocal = pending.filter((key) => !resolved.has(key));
+    for (const key of needLocal) {
+        const local = await localObjectKeyFor(key, uid);
+        if (local) resolved.set(key, local);
+    }
+
+    const needBackfill = needLocal.filter((key) => !resolved.has(key));
+    if (needBackfill.length && currentCloudUserId() === uid) {
+        const uploaded = await backfillLocalStorageKeys(needBackfill, uid);
+        for (const [key, objKey] of Object.entries(uploaded)) {
+            if (isOwnedObjectKey(objKey, uid)) resolved.set(key, objKey);
+        }
+    }
+
+    if (!resolved.size || currentCloudUserId() !== uid) return project;
     let changed = false;
     const rewritten = await rewriteStorageKeys(doc, async (key) => {
-        if (key.startsWith("media/") || key.startsWith("data:")) return key;
-        const objectKey = remoteKeys[key];
+        if (!key || key.startsWith("media/") || key.startsWith("data:")) return key;
+        const objectKey = resolved.get(key);
         if (objectKey) {
             changed = true;
             return objectKey;
         }
         return key;
     });
-    if (!changed) return project;
+    if (!changed || currentCloudUserId() !== uid) return project;
     const saved = await saveCloudProject(cloudProjectId, project.title, JSON.stringify(rewritten), project.revision);
     return saved.project || project;
 }

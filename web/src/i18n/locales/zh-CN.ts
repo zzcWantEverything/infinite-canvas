@@ -307,7 +307,7 @@ export default {
         project: {
             untitled: "未命名画布", imported: "导入画布",
             select: "选择 {{name}}", stats: "{{nodes}} 个节点 · {{connections}} 条连线", updated: "更新于 {{date}}", saveName: "保存名称", cancelRename: "取消重命名", export: "导出", rename: "重命名", delete: "删除",
-            deleteTitle: "删除画布？", deleteDescription: "将删除 {{count}} 个画布，里面的节点和连线也会一起移除。",
+            deleteTitle: "删除画布？", deleteDescription: "将从当前账号「{{account}}」的云端和本地删除 {{count}} 个画布，里面的节点和连线也会一起移除。",
         },
         export: { defaultProjectName: "画柚", defaultNodesName: "画布元素", item: "元素" },
         createMenu: {

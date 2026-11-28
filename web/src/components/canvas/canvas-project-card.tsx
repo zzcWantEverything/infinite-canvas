@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { pushProjectToCloud } from "@/services/canvas-cloud-sync";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { hasAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 
@@ -29,6 +30,8 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
     };
     const saveTitle = () => {
         renameProject(project.id, editingTitle);
+        const updated = useCanvasStore.getState().openProject(project.id);
+        if (updated) void pushProjectToCloud(updated);
         stopEditing();
     };
 

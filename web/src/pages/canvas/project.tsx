@@ -11,7 +11,7 @@ import { createVideoGenerationTask, isVideoMediaPending, isVideoTaskFailed, poll
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, imageToDataUrl, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { pushProjectToCloud, repairProjectMediaKeysByLocalId } from "@/services/canvas-cloud-sync";
+import { deleteProjectsFromCloud, ensureProjectLoadedFromCloud, pushProjectKeepalive, pushProjectToCloud, repairProjectMediaKeysByLocalId } from "@/services/canvas-cloud-sync";
 import { useCanvasSyncStore } from "@/stores/canvas/use-canvas-sync-store";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -45,7 +45,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { flushCanvasLocalPersistence, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -639,19 +639,26 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!hydrated) return;
+        let cancelled = false;
         setProjectLoaded(false);
-        const project = openProject(projectId);
-        if (!project) {
-            navigate("/canvas", { replace: true });
-            return;
-        }
 
         const restore = async () => {
+            let project = openProject(projectId);
+            if (!project) {
+                project = (await ensureProjectLoadedFromCloud(projectId)) ?? null;
+            }
+            if (cancelled) return;
+            if (!project) {
+                navigate("/canvas", { replace: true });
+                return;
+            }
             // 打开画布时顺手修复云端文档里残留的本地键（历史 doc 存的是 video:xxx），
             // 换设备后靠服务端映射改回 object_key，不阻塞本地渲染。
             void repairProjectMediaKeysByLocalId(projectId);
             const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
+            if (cancelled) return;
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
+            if (cancelled) return;
             setNodes(restoredNodes);
             setConnections(project.connections);
             setChatSessions(restoredSessions);
@@ -676,6 +683,9 @@ function InfiniteCanvasPage() {
             setProjectLoaded(true);
         };
         void restore();
+        return () => {
+            cancelled = true;
+        };
     }, [hydrated, navigate, openProject, projectId]);
 
     useEffect(() => {
@@ -933,7 +943,7 @@ function InfiniteCanvasPage() {
             lastCloudPushAtRef.current = Date.now();
             const project = useCanvasStore.getState().openProject(projectId);
             if (project) void pushProjectToCloud(project);
-        }, 3000);
+        }, 1500);
     }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
 
     useEffect(() => {
@@ -952,17 +962,59 @@ function InfiniteCanvasPage() {
         };
     }, [projectId, projectLoaded, updateProject, viewport]);
 
+    const flushPendingCloudPush = useCallback(
+        (useKeepalive = false) => {
+            void flushCanvasLocalPersistence();
+            if (!cloudPushTimerRef.current) return;
+            clearTimeout(cloudPushTimerRef.current);
+            cloudPushTimerRef.current = null;
+            const project = useCanvasStore.getState().openProject(projectId);
+            if (!project) return;
+            lastCloudPushAtRef.current = Date.now();
+            if (useKeepalive) {
+                pushProjectKeepalive(project);
+            } else {
+                void pushProjectToCloud(project);
+            }
+        },
+        [projectId],
+    );
+
+    // 切后台、刷新或关页前把防抖中的保存立即兜底发出；仍在上传/保存时弹出关闭拦截提示。
+    useEffect(() => {
+        const onVisibilityChange = () => {
+            if (document.visibilityState === "hidden") {
+                flushPendingCloudPush(false);
+            }
+        };
+        const onPageHide = () => {
+            flushPendingCloudPush(true);
+        };
+        const onBeforeUnload = (event: BeforeUnloadEvent) => {
+            const hasPendingTimer = cloudPushTimerRef.current !== null;
+            const isSaving = useCanvasSyncStore.getState().status === "saving";
+            if (hasPendingTimer || isSaving) {
+                flushPendingCloudPush(true);
+                event.preventDefault();
+                event.returnValue = "";
+            }
+        };
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        window.addEventListener("pagehide", onPageHide);
+        window.addEventListener("beforeunload", onBeforeUnload);
+        return () => {
+            document.removeEventListener("visibilitychange", onVisibilityChange);
+            window.removeEventListener("pagehide", onPageHide);
+            window.removeEventListener("beforeunload", onBeforeUnload);
+        };
+    }, [flushPendingCloudPush]);
+
     // 离开画布时把尚未触发的云端保存补发一次，避免最后几笔编辑被防抖吞掉。
     useEffect(() => {
         return () => {
-            if (cloudPushTimerRef.current) {
-                clearTimeout(cloudPushTimerRef.current);
-                cloudPushTimerRef.current = null;
-                const project = useCanvasStore.getState().openProject(projectId);
-                if (project) void pushProjectToCloud(project);
-            }
+            flushPendingCloudPush(false);
         };
-    }, [projectId]);
+    }, [flushPendingCloudPush]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -1620,7 +1672,12 @@ function InfiniteCanvasPage() {
     }, [createProject, navigate, t]);
 
     const deleteCurrentProject = useCallback(() => {
+        if (cloudPushTimerRef.current) {
+            clearTimeout(cloudPushTimerRef.current);
+            cloudPushTimerRef.current = null;
+        }
         deleteProjects([projectId]);
+        void deleteProjectsFromCloud([projectId]);
         cleanupAssetImages();
         navigate("/canvas");
     }, [cleanupAssetImages, deleteProjects, navigate, projectId]);
@@ -2742,9 +2799,13 @@ function InfiniteCanvasPage() {
 
     const finishTitleEditing = useCallback(() => {
         const nextTitle = titleDraft.trim();
-        if (nextTitle) renameProject(projectId, nextTitle);
+        if (nextTitle && nextTitle !== currentProject?.title) {
+            renameProject(projectId, nextTitle);
+            const updated = useCanvasStore.getState().openProject(projectId);
+            if (updated) void pushProjectToCloud(updated);
+        }
         setTitleEditing(false);
-    }, [projectId, renameProject, titleDraft]);
+    }, [currentProject?.title, projectId, renameProject, titleDraft]);
 
     const preventCanvasContextMenu = useCallback((event: ReactMouseEvent) => {
         if ((event.target as HTMLElement).closest("[data-node-id]")) return;

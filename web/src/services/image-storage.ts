@@ -2,7 +2,7 @@ import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
-import { getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, uploadToCloud } from "@/services/canvas-cloud";
+import { currentCloudUserId, getCloudMediaUrls, isCloudEnabled, objectKeyFor, recordObjectKey, trackCloudUpload, uploadToCloud } from "@/services/canvas-cloud";
 import { withLocalProxy } from "@/stores/use-config-store";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
 
@@ -61,7 +61,7 @@ async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<Uploa
         throwIfAborted(options?.signal);
         objectUrls.set(storageKey, url);
         await storeImagePreview(storageKey, blob);
-        void syncImageToCloud(storageKey, blob, meta);
+        trackCloudUpload(syncImageToCloud(storageKey, blob, meta));
         return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type.startsWith("image/") ? blob.type : "" };
     } catch (error) {
         URL.revokeObjectURL(url);
@@ -156,10 +156,11 @@ export async function imagePublicUrl(storageKey?: string): Promise<string> {
     }
     let objectKey = await objectKeyFor(storageKey);
     if (!objectKey && isCloudEnabled()) {
+        const uid = currentCloudUserId();
         const blob = await store.getItem<Blob>(storageKey);
-        if (blob) {
-            objectKey = await uploadToCloud(blob, "image", blob.type || "image/png");
-            await recordObjectKey(storageKey, objectKey);
+        if (blob && uid) {
+            objectKey = await uploadToCloud(blob, "image", blob.type || "image/png", { local_key: storageKey });
+            await recordObjectKey(storageKey, objectKey, uid);
         }
     }
     if (!objectKey) return "";
@@ -194,10 +195,11 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
 
 // 上传成功后把 storageKey -> objectKey 的映射落盘，供跨设备回放。
 async function syncImageToCloud(storageKey: string, blob: Blob, meta: { width?: number; height?: number }) {
-    if (!isCloudEnabled()) return;
+    const uid = currentCloudUserId();
+    if (!uid || !isCloudEnabled()) return;
     try {
-        const objectKey = await uploadToCloud(blob, "image", blob.type || "image/png", { width: meta.width, height: meta.height });
-        await recordObjectKey(storageKey, objectKey);
+        const objectKey = await uploadToCloud(blob, "image", blob.type || "image/png", { width: meta.width, height: meta.height, local_key: storageKey });
+        await recordObjectKey(storageKey, objectKey, uid);
     } catch {
         // 失败静默，本地图片照常可用。
     }
