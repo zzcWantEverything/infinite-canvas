@@ -7,7 +7,16 @@ import { withLocalProxy } from "@/stores/use-config-store";
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "media_files" });
+const videoPreviewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_previews" });
 const objectUrls = new Map<string, string>();
+const videoPreviewUrls = new Map<string, string>();
+const videoPreviewInflight = new Map<string, Promise<string | null>>();
+
+const VIDEO_PREVIEW_VERSION = 1;
+const VIDEO_PREVIEW_MAX_EDGE = 480;
+const VIDEO_PREVIEW_TIMEOUT_MS = 10_000;
+
+type StoredVideoPreview = { version: number; blob?: Blob };
 
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
@@ -69,12 +78,62 @@ export async function setMediaBlob(storageKey: string, blob: Blob) {
     return url;
 }
 
+async function deleteVideoPreview(key: string) {
+    const url = videoPreviewUrls.get(key);
+    if (url) URL.revokeObjectURL(url);
+    videoPreviewUrls.delete(key);
+    await videoPreviewStore.removeItem(key).catch(() => undefined);
+}
+
+/**
+ * 解析视频卡片缩略图：优先命中的本地 IndexedDB 首帧 WebP 缓存，否则从视频抽一帧并缓存；
+ * 若跨域画布读取被拦（CORS），降级返回可直接展示首帧的视频 URL。
+ */
+export async function resolveVideoPreview(storageKey?: string, fallbackUrl = ""): Promise<{ posterUrl: string | null; videoUrl: string | null }> {
+    if (storageKey) {
+        const cached = videoPreviewUrls.get(storageKey);
+        if (cached) return { posterUrl: cached, videoUrl: null };
+        const stored = await videoPreviewStore.getItem<StoredVideoPreview>(storageKey).catch(() => null);
+        if (stored?.version === VIDEO_PREVIEW_VERSION && stored.blob) {
+            const url = URL.createObjectURL(stored.blob);
+            videoPreviewUrls.set(storageKey, url);
+            return { posterUrl: url, videoUrl: null };
+        }
+    }
+
+    const videoUrl = storageKey ? await resolveMediaUrl(storageKey, fallbackUrl) : fallbackUrl;
+    if (!videoUrl) return { posterUrl: null, videoUrl: null };
+
+    const inflightKey = storageKey || videoUrl;
+    let task = videoPreviewInflight.get(inflightKey);
+    if (!task) {
+        task = (async () => {
+            const blob = await captureVideoThumbnailBlob(videoUrl);
+            if (!blob) return null;
+            const posterUrl = URL.createObjectURL(blob);
+            if (storageKey) {
+                videoPreviewUrls.set(storageKey, posterUrl);
+                await videoPreviewStore.setItem<StoredVideoPreview>(storageKey, { version: VIDEO_PREVIEW_VERSION, blob }).catch(() => undefined);
+            }
+            return posterUrl;
+        })().finally(() => {
+            videoPreviewInflight.delete(inflightKey);
+        });
+        videoPreviewInflight.set(inflightKey, task);
+    }
+
+    const posterUrl = await task;
+    if (posterUrl) return { posterUrl, videoUrl: null };
+    return { posterUrl: null, videoUrl };
+}
+
 export async function deleteStoredMedia(keys: Iterable<string>) {
     await Promise.all(
         Array.from(new Set(keys)).map(async (key) => {
             const url = objectUrls.get(key);
             if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
+            await deleteVideoPreview(key);
             await store.removeItem(key);
         }),
     );
@@ -82,11 +141,19 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
 
 export async function cleanupUnusedMedia(usedData: unknown) {
     const usedKeys = collectMediaStorageKeys(usedData);
+    const allUsedKeys = collectAllStorageKeys(usedData);
     const unused: string[] = [];
     await store.iterate((_value, key) => {
         if (!usedKeys.has(key)) unused.push(key);
     });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    const orphanPreviews: string[] = [];
+    await videoPreviewStore.iterate((_value, key) => {
+        if (!allUsedKeys.has(key)) orphanPreviews.push(key);
+    });
+    await Promise.all([
+        ...unused.map((key) => store.removeItem(key)),
+        ...orphanPreviews.map((key) => deleteVideoPreview(key)),
+    ]);
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {
@@ -94,6 +161,86 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
     if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectMediaStorageKeys(child, keys)) : collectMediaStorageKeys(item, keys)));
     return keys;
+}
+
+function collectAllStorageKeys(value: unknown, keys = new Set<string>()) {
+    if (!value || typeof value !== "object") return keys;
+    if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey) keys.add(value.storageKey);
+    Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectAllStorageKeys(child, keys)) : collectAllStorageKeys(item, keys)));
+    return keys;
+}
+
+async function captureVideoThumbnailBlob(url: string, maxEdge = VIDEO_PREVIEW_MAX_EDGE): Promise<Blob | null> {
+    if (typeof document === "undefined") return null;
+    const video = document.createElement("video");
+    if (!url.startsWith("blob:") && !url.startsWith("data:")) {
+        video.crossOrigin = "anonymous";
+    }
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+
+    let timeoutId = 0;
+    try {
+        const timeoutPromise = new Promise<never>((_resolve, reject) => {
+            timeoutId = window.setTimeout(() => reject(new Error("Video preview timeout")), VIDEO_PREVIEW_TIMEOUT_MS);
+        });
+
+        await Promise.race([
+            (async () => {
+                const metadataLoaded = waitForVideoEvent(video, "loadedmetadata");
+                video.src = url;
+                video.load();
+                await metadataLoaded;
+
+                if (Number.isFinite(video.duration) && video.duration > 0.15) {
+                    const seeked = waitForVideoEvent(video, "seeked");
+                    video.currentTime = Math.min(0.1, video.duration * 0.1);
+                    await seeked;
+                } else if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+                    await waitForVideoEvent(video, "loadeddata");
+                }
+            })(),
+            timeoutPromise,
+        ]);
+
+        if (!video.videoWidth || !video.videoHeight) return null;
+        const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
+        const width = Math.max(1, Math.round(video.videoWidth * scale));
+        const height = Math.max(1, Math.round(video.videoHeight * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) return null;
+        context.drawImage(video, 0, 0, width, height);
+        return await new Promise<Blob | null>((resolve) => {
+            canvas.toBlob((result) => resolve(result), "image/webp", 0.82);
+        });
+    } catch {
+        return null;
+    } finally {
+        if (timeoutId) window.clearTimeout(timeoutId);
+        video.removeAttribute("src");
+        video.load();
+    }
+}
+
+function waitForVideoEvent(video: HTMLVideoElement, eventName: "loadedmetadata" | "loadeddata" | "seeked") {
+    return new Promise<void>((resolve, reject) => {
+        const finish = () => {
+            video.removeEventListener(eventName, finish);
+            video.removeEventListener("error", fail);
+            resolve();
+        };
+        const fail = () => {
+            video.removeEventListener(eventName, finish);
+            video.removeEventListener("error", fail);
+            reject(new Error("Video preview load failed"));
+        };
+        video.addEventListener(eventName, finish);
+        video.addEventListener("error", fail);
+    });
 }
 
 function mediaKindFromPrefix(prefix: string) {
