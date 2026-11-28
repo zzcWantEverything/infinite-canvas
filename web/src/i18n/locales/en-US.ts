@@ -49,6 +49,8 @@ export default {
             pricePerSecond: "≈ ¥{{price}}/s",
             pricePerCall: "≈ ¥{{price}}/request",
             pricePerUsage: "Charged by usage",
+            stockRemaining: "{{n}} left",
+            stockEmpty: "0 left",
         },
     },
     generation: { pending: ["Creating image", "Almost there", "Just a little longer", "Refining details"] },

@@ -4,14 +4,16 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
+import { ModelStockBadge } from "@/components/model-picker";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution, readVideoDimensions, VIDEO_SECONDS_MAX, VIDEO_SECONDS_MIN, videoRatioOptions } from "@/lib/media-size";
 import { estimateVideoPrice, estimateVideoTokens, videoModelCapability, videoModelDefaultResolution, videoModelPrice, type VideoModelCapability } from "@/config/video-models";
 import { estimateModelPrice } from "@/lib/model-price";
 import { reportApiError } from "@/services/api/http";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
+import { useUserStore } from "@/stores/use-user-store";
 import { fetchPricingSnapshot, type PricingSnapshot } from "@/services/api/pricing";
-import { modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
+import { catalogVariantStock, modelCatalogVersion, refreshModelCatalogIfStale, subscribeModelCatalog } from "@/services/api/model-catalog";
 
 const resolutionOptions = [
     { value: "480", label: "480p" },
@@ -41,6 +43,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const catalogVersion = useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
     const modelName = modelOptionName(config.videoModel || config.model);
     const capability = useMemo(() => videoModelCapability(modelName), [modelName, catalogVersion]);
+    const stock = useMemo(() => catalogVariantStock(modelName), [modelName, catalogVersion]);
+    useEffect(() => {
+        const live = useUserStore.getState().session;
+        if (live?.token) void refreshModelCatalogIfStale(live.baseUrl, live.token, 30_000);
+    }, [modelName]);
     // 火山格式的模型各自限制尺寸、时长和参考素材，面板按当前模型的能力渲染；其他模型沿用全局范围。
     const secondsRange = capability ? { min: capability.seconds.min, max: capability.seconds.max, step: capability.seconds.step || 1 } : { min: VIDEO_SECONDS_MIN, max: VIDEO_SECONDS_MAX, step: 1 };
     const seconds = capability ? clampRangeSeconds(capability, config.videoSeconds) : Number(clampVideoSeconds(config.videoSeconds || "6"));
@@ -150,8 +157,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 {capability ? (
                     <SettingGroup title={t("settingsPanels.video.estimatedPrice")} color={theme.node.muted}>
-                        <div className="text-sm" style={{ color: theme.node.text }} title={priceHint || undefined}>
-                            {price === null ? "-" : `≈ ￥${price.toFixed(2)}`}
+                        <div className="flex flex-wrap items-center gap-2 text-sm" style={{ color: theme.node.text }} title={priceHint || undefined}>
+                            <span>{price === null ? "-" : `≈ ￥${price.toFixed(2)}`}</span>
+                            <ModelStockBadge remaining={stock?.remaining} />
                         </div>
                     </SettingGroup>
                 ) : (

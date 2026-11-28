@@ -1,14 +1,15 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button, Popover, Select } from "antd";
 import { Image as ImageIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { ModelPicker } from "@/components/model-picker";
+import { ModelPicker, ModelStockBadge } from "@/components/model-picker";
 import { CHARACTER_STYLES, characterStyleOf, DEFAULT_CHARACTER_STYLE } from "@/config/character-styles";
 import { clampSecondsToModel, videoModelCapability, videoModelDefaultResolution } from "@/config/video-models";
 import { computeMediaSize, mediaRatioOptions, mediaScaleOptions } from "@/lib/media-size";
 import { cn } from "@/lib/utils";
-import { encodeChannelModel, modelOptionLabel, pickPreferredImageModelOption, selectableModelsByCapability, type AiConfig } from "@/stores/use-config-store";
+import { catalogVariantStock, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
+import { encodeChannelModel, modelOptionLabel, modelOptionName, pickPreferredImageModelOption, selectableModelsByCapability, type AiConfig } from "@/stores/use-config-store";
 
 /** 生成阶段的统一参数：所有角色/场景/物品共用一套生图参数，所有分镜共用一套生视频参数。 */
 export type CopyGenSettings = {
@@ -319,6 +320,8 @@ export function CopyImageSettingsBar({ config, value, onChange, disabled, childr
 /** 分镜列表上方的一条参数栏：视频模型 / 画幅 / 分辨率 / 时长（+ 批量按钮）。 */
 export function CopyVideoSettingsBar({ config, value, onChange, disabled, children }: ImageBarProps) {
     const { t } = useTranslation();
+    const catalogVersion = useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion, modelCatalogVersion);
+    const videoStock = useMemo(() => catalogVariantStock(modelOptionName(value.videoModel)), [value.videoModel, catalogVersion]);
 
     const videoRatioChoices = useMemo(() => videoModelRatioOptions(value.videoModel), [value.videoModel]);
     const secondOptions = useMemo(() => videoModelSecondOptions(value.videoModel, t("copyVideo.secondsAuto"), true), [value.videoModel, t]);
@@ -338,6 +341,11 @@ export function CopyVideoSettingsBar({ config, value, onChange, disabled, childr
                     placeholder={t("copyVideo.videoModel")}
                     className={cn(pickerPlain, disabled && "pointer-events-none opacity-60")}
                 />
+                {videoStock ? (
+                    <span className="pr-1">
+                        <ModelStockBadge remaining={videoStock.remaining} />
+                    </span>
+                ) : null}
             </div>
             <div className={pill}>
                 <span className={pillLabel}>{t("copyVideo.ratio")}</span>

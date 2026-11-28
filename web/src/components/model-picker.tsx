@@ -9,7 +9,7 @@ import { encodeChannelModel, guessCapability, modelOptionLabel, modelOptionName,
 import { useUserStore } from "@/stores/use-user-store";
 import { fetchUserModels } from "@/services/api/auth";
 import { reportApiError } from "@/services/api/http";
-import { catalogGroupOf, catalogVariant, modelCatalogVersion, subscribeModelCatalog } from "@/services/api/model-catalog";
+import { catalogGroupOf, catalogVariant, catalogVariantStock, modelCatalogVersion, refreshModelCatalogIfStale, subscribeModelCatalog } from "@/services/api/model-catalog";
 import { fetchPricingSnapshot, type PricingModelEntry, type PricingSnapshot } from "@/services/api/pricing";
 import { groupModelOptions } from "@/lib/model-picker-groups";
 import { estimateModelPrice } from "@/lib/model-price";
@@ -144,7 +144,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     // 条目副标题（参考素材上限）+ 右侧价位。只写模型真正声明过的东西：目录里没写的字段
     // 当「没声明」跳过，不编成「不支持」，否则会把能传视频的模型标成不能传。
     const optionSummaries = useMemo(() => {
-        const summaries = new Map<string, { detail: string; price: string }>();
+        const summaries = new Map<string, { detail: string; price: string; stockRemaining: number | null }>();
         const unsupported = t("settingsPanels.model.detailUnsupported");
         for (const option of options) {
             const name = modelOptionName(option);
@@ -166,7 +166,10 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 : entry
                   ? t("settingsPanels.model.pricePerUsage")
                   : "";
-            if (parts.length || price) summaries.set(option, { detail: parts.join(" · "), price });
+            const stockRemaining = catalogVariantStock(name)?.remaining ?? null;
+            if (parts.length || price || stockRemaining !== null) {
+                summaries.set(option, { detail: parts.join(" · "), price, stockRemaining });
+            }
         }
         return summaries;
     }, [options, pricing, catalogVersion, t, config.vquality]);
@@ -218,7 +221,11 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             onOpenChange={(nextOpen) => {
                 // 视频能力：服务器已提供模型列表时不触发配置弹窗；其他能力保留原逻辑。
                 if (nextOpen && !options.length && config.channelMode === "local" && capability !== "video") onMissingConfig?.();
-                if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
+                if (nextOpen) {
+                    window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
+                    const live = useUserStore.getState().session;
+                    if (live?.token) void refreshModelCatalogIfStale(live.baseUrl, live.token, 30_000);
+                }
                 setOpen(nextOpen);
                 onMenuOpenChange?.(nextOpen);
             }}
@@ -260,7 +267,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                             const summary = optionSummaries.get(only.value);
                             return (
                                 <SelectItem key={only.value} value={only.value} textValue={modelOptionLabel(config, only.value)}>
-                                    <ModelLabel config={config} model={only.value} detail={summary?.detail} price={summary?.price} />
+                                    <ModelLabel config={config} model={only.value} detail={summary?.detail} price={summary?.price} stockRemaining={summary?.stockRemaining} />
                                 </SelectItem>
                             );
                         }
@@ -271,7 +278,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                                     const summary = optionSummaries.get(item.value);
                                     return (
                                         <SelectItem key={item.value} value={item.value} textValue={modelOptionLabel(config, item.value)}>
-                                            <ModelLabel config={config} model={item.value} label={item.label} detail={summary?.detail} price={summary?.price} />
+                                            <ModelLabel config={config} model={item.value} label={item.label} detail={summary?.detail} price={summary?.price} stockRemaining={summary?.stockRemaining} />
                                         </SelectItem>
                                     );
                                 })}
@@ -407,13 +414,38 @@ function formatMoney(value: number) {
     return rounded >= 1 ? rounded.toFixed(2) : String(Number(value.toFixed(3)));
 }
 
-function ModelLabel({ config, model, label, detail, price }: { config: AiConfig; model: string; label?: string; detail?: string; price?: string }) {
+export function ModelStockBadge({ remaining, className }: { remaining?: number | null; className?: string }) {
+    const { t } = useTranslation();
+    if (remaining === null || remaining === undefined) return null;
+    const depleted = remaining <= 0;
+    return (
+        <span
+            className={cn(
+                "inline-flex shrink-0 items-center rounded-md border px-1.5 py-0 text-[10px] font-medium leading-4 tabular-nums",
+                depleted
+                    ? "border-rose-300/70 bg-rose-50 text-rose-700 dark:border-rose-500/35 dark:bg-rose-500/15 dark:text-rose-300"
+                    : "border-amber-300/70 bg-amber-50 text-amber-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-300",
+                className,
+            )}
+        >
+            {depleted ? t("settingsPanels.model.stockEmpty") : t("settingsPanels.model.stockRemaining", { n: remaining })}
+        </span>
+    );
+}
+
+function ModelLabel({ config, model, label, detail, price, stockRemaining }: { config: AiConfig; model: string; label?: string; detail?: string; price?: string; stockRemaining?: number | null }) {
+    const hasStock = stockRemaining !== null && stockRemaining !== undefined;
     return (
         <span className="flex w-full min-w-0 items-center gap-2">
             <ModelIcon model={model} />
             <span className="min-w-0 flex-1">
                 <span className="block truncate">{label || modelOptionLabel(config, model)}</span>
-                {detail ? <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{detail}</span> : null}
+                {hasStock || detail ? (
+                    <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <ModelStockBadge remaining={stockRemaining} />
+                        {detail ? <span className="min-w-0 truncate">{detail}</span> : null}
+                    </span>
+                ) : null}
             </span>
             {price ? <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">{price}</span> : null}
         </span>

@@ -48,11 +48,17 @@ export type CatalogPricing = {
     examples?: Array<{ label: string; facts: Record<string, unknown> }>;
 };
 
+export type CatalogStock = {
+    limited: boolean;
+    remaining?: number | null;
+};
+
 export type CatalogVariant = {
     model: string;
     display_name: string;
     capabilities?: CatalogCapability;
     pricing: CatalogPricing;
+    stock?: CatalogStock | null;
 };
 
 export type CatalogGroup = {
@@ -161,6 +167,25 @@ export function fetchModelCatalog(baseUrl: string, token: string, options?: { fo
 export function catalogVariant(model: string): CatalogVariant | null {
     if (!variantIndex) return null;
     return variantIndex.get(model) ?? null;
+}
+
+/** 读取目录缓存里按次限量的剩余份数（未限量或未知返回 null，保留 0 份）。 */
+export function catalogVariantStock(model: string): { limited: true; remaining: number } | null {
+    const stock = catalogVariant(model)?.stock;
+    if (!stock?.limited || typeof stock.remaining !== "number" || !Number.isFinite(stock.remaining)) {
+        return null;
+    }
+    return { limited: true, remaining: Math.max(0, Math.floor(stock.remaining)) };
+}
+
+/** 目录缓存超过 maxAgeMs 时强制重拉，以便获取最新的上游剩余份数。 */
+export function refreshModelCatalogIfStale(baseUrl: string, token: string, maxAgeMs = 30_000): Promise<CatalogVariant[]> {
+    const scope = `${(baseUrl || "").trim()}|${(token || "").trim()}`;
+    if (!token) return Promise.resolve(variantIndex ? Array.from(variantIndex.values()) : []);
+    if (variantIndex && scope === cachedScope && Date.now() - cachedAt < maxAgeMs) {
+        return Promise.resolve(Array.from(variantIndex.values()));
+    }
+    return fetchModelCatalog(baseUrl, token, { force: true });
 }
 
 /**

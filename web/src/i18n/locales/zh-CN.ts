@@ -49,6 +49,8 @@ export default {
             pricePerSecond: "约 ¥{{price}}/秒",
             pricePerCall: "约 ¥{{price}}/次",
             pricePerUsage: "按用量计费",
+            stockRemaining: "剩余 {{n}} 份",
+            stockEmpty: "剩余 0 份",
         },
     },
     generation: { pending: ["正在创建图片", "马上就好了", "再等等", "正在整理细节"] },
