@@ -8,6 +8,7 @@ import { humanizeUpstreamError } from "@/lib/upstream-error";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { previewUrlFor, subscribeImagePreviews, getImagePreviewRevision } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { NODE_MIN_HEIGHT, NODE_MIN_WIDTH } from "@/lib/canvas/canvas-node-size";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -16,7 +17,19 @@ import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin"
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
 
+type ResizeDirection = "top" | "right" | "bottom" | "left" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+type ResizeEdge = "top" | "right" | "bottom" | "left";
+const RESIZE_CURSOR: Record<ResizeDirection, string> = {
+    top: "ns-resize",
+    bottom: "ns-resize",
+    left: "ew-resize",
+    right: "ew-resize",
+    "top-left": "nwse-resize",
+    "bottom-right": "nwse-resize",
+    "top-right": "nesw-resize",
+    "bottom-left": "nesw-resize",
+};
 const selectionBlue = "#2f80ff";
 
 type CanvasNodeProps = {
@@ -154,15 +167,18 @@ export const CanvasNode = React.memo(function CanvasNode({
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
         isResizing: false,
-        corner: "bottom-right" as ResizeCorner,
+        direction: "bottom-right" as ResizeDirection,
         startX: 0,
         startY: 0,
         startLeft: 0,
         startTop: 0,
         startWidth: 0,
         startHeight: 0,
+        minWidth: NODE_MIN_WIDTH,
+        minHeight: NODE_MIN_HEIGHT,
         keepRatio: false,
         ratio: 1,
+        prevBodyCursor: "",
     });
 
     useEffect(() => {
@@ -226,22 +242,62 @@ export const CanvasNode = React.memo(function CanvasNode({
 
     const handleResizeMove = useCallback(
         (event: MouseEvent) => {
-            if (!resizeRef.current.isResizing) return;
+            const current = resizeRef.current;
+            if (!current.isResizing) return;
 
-            const dx = (event.clientX - resizeRef.current.startX) / scale;
-            const dy = (event.clientY - resizeRef.current.startY) / scale;
-            const minWidth = 220;
-            const minHeight = 160;
-            const startRight = resizeRef.current.startLeft + resizeRef.current.startWidth;
-            const startBottom = resizeRef.current.startTop + resizeRef.current.startHeight;
-            const fromLeft = resizeRef.current.corner.includes("left");
-            const fromTop = resizeRef.current.corner.includes("top");
-            const rawWidth = Math.max(minWidth, resizeRef.current.startWidth + (fromLeft ? -dx : dx));
-            const rawHeight = Math.max(minHeight, resizeRef.current.startHeight + (fromTop ? -dy : dy));
-            let width = rawWidth;
-            let height = rawHeight;
-            if (resizeRef.current.keepRatio) {
-                const ratio = resizeRef.current.ratio;
+            const dx = (event.clientX - current.startX) / scale;
+            const dy = (event.clientY - current.startY) / scale;
+            const { direction, startLeft, startTop, startWidth, startHeight, minWidth, minHeight, keepRatio, ratio } = current;
+            const startRight = startLeft + startWidth;
+            const startBottom = startTop + startHeight;
+            const hasLeft = direction === "left" || direction === "top-left" || direction === "bottom-left";
+            const hasRight = direction === "right" || direction === "top-right" || direction === "bottom-right";
+            const hasTop = direction === "top" || direction === "top-left" || direction === "top-right";
+            const hasBottom = direction === "bottom" || direction === "bottom-left" || direction === "bottom-right";
+            const isHorizontalEdge = direction === "left" || direction === "right";
+            const isVerticalEdge = direction === "top" || direction === "bottom";
+
+            let width = startWidth;
+            let height = startHeight;
+            let x = startLeft;
+            let y = startTop;
+
+            if (!keepRatio) {
+                width = hasLeft ? Math.max(minWidth, startWidth - dx) : hasRight ? Math.max(minWidth, startWidth + dx) : startWidth;
+                height = hasTop ? Math.max(minHeight, startHeight - dy) : hasBottom ? Math.max(minHeight, startHeight + dy) : startHeight;
+                x = hasLeft ? startRight - width : startLeft;
+                y = hasTop ? startBottom - height : startTop;
+            } else if (isHorizontalEdge) {
+                width = Math.max(minWidth, startWidth + (hasLeft ? -dx : dx));
+                height = width / ratio;
+                if (height < minHeight) {
+                    height = minHeight;
+                    width = height * ratio;
+                }
+                if (width < minWidth) {
+                    width = minWidth;
+                    height = width / ratio;
+                }
+                x = hasLeft ? startRight - width : startLeft;
+                y = startTop + (startHeight - height) / 2;
+            } else if (isVerticalEdge) {
+                height = Math.max(minHeight, startHeight + (hasTop ? -dy : dy));
+                width = height * ratio;
+                if (width < minWidth) {
+                    width = minWidth;
+                    height = width / ratio;
+                }
+                if (height < minHeight) {
+                    height = minHeight;
+                    width = height * ratio;
+                }
+                x = startLeft + (startWidth - width) / 2;
+                y = hasTop ? startBottom - height : startTop;
+            } else {
+                const rawWidth = Math.max(minWidth, startWidth + (hasLeft ? -dx : dx));
+                const rawHeight = Math.max(minHeight, startHeight + (hasTop ? -dy : dy));
+                width = rawWidth;
+                height = rawHeight;
                 if (Math.abs(dx) >= Math.abs(dy)) {
                     height = width / ratio;
                 } else {
@@ -255,47 +311,64 @@ export const CanvasNode = React.memo(function CanvasNode({
                     width = minWidth;
                     height = width / ratio;
                 }
+                x = hasLeft ? startRight - width : startLeft;
+                y = hasTop ? startBottom - height : startTop;
             }
 
-            onResize(data.id, width, height, {
-                x: fromLeft ? startRight - width : resizeRef.current.startLeft,
-                y: fromTop ? startBottom - height : resizeRef.current.startTop,
-            });
+            onResize(data.id, width, height, { x, y });
         },
         [data.id, onResize, scale],
     );
 
     const handleResizeUp = useCallback(() => {
+        if (!resizeRef.current.isResizing) return;
         resizeRef.current.isResizing = false;
+        document.body.style.cursor = resizeRef.current.prevBodyCursor;
         window.removeEventListener("mousemove", handleResizeMove);
         window.removeEventListener("mouseup", handleResizeUp);
+        window.removeEventListener("blur", handleResizeUp);
         onResizeEnd(data.id);
     }, [data.id, handleResizeMove, onResizeEnd]);
 
-    const handleResizeMouseDown = (event: React.MouseEvent, corner: ResizeCorner) => {
+    const handleResizeMouseDown = (event: React.MouseEvent, direction: ResizeDirection) => {
+        if (event.button !== 0) return;
         event.stopPropagation();
         event.preventDefault();
         onResizeStart(data.id);
+        const isMediaType = data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video;
+        const hasMediaContent = Boolean(data.metadata?.content);
+        const keepRatio = isMediaType ? hasMediaContent && (data.type === CanvasNodeType.Video || !data.metadata?.freeResize) : Boolean(definition?.keepAspectRatio?.(data));
+        const prevBodyCursor = document.body.style.cursor;
+        document.body.style.cursor = RESIZE_CURSOR[direction];
         resizeRef.current = {
             isResizing: true,
-            corner,
+            direction,
             startX: event.clientX,
             startY: event.clientY,
             startLeft: data.position.x,
             startTop: data.position.y,
             startWidth: data.width,
             startHeight: data.height,
-            keepRatio: (data.type === CanvasNodeType.Image && !data.metadata?.freeResize) || data.type === CanvasNodeType.Video || Boolean(definition?.keepAspectRatio?.(data)),
-            ratio: (data.metadata?.naturalWidth || data.width) / (data.metadata?.naturalHeight || data.height || 1),
+            minWidth: Math.max(80, Math.min(NODE_MIN_WIDTH, data.width)),
+            minHeight: Math.max(80, Math.min(NODE_MIN_HEIGHT, data.height)),
+            keepRatio,
+            ratio: Math.max(0.05, (data.metadata?.naturalWidth || data.width) / Math.max(1, data.metadata?.naturalHeight || data.height)),
+            prevBodyCursor,
         };
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
+        window.addEventListener("blur", handleResizeUp);
     };
 
     useEffect(() => {
         return () => {
+            if (resizeRef.current.isResizing) {
+                resizeRef.current.isResizing = false;
+                document.body.style.cursor = resizeRef.current.prevBodyCursor;
+            }
             window.removeEventListener("mousemove", handleResizeMove);
             window.removeEventListener("mouseup", handleResizeUp);
+            window.removeEventListener("blur", handleResizeUp);
         };
     }, [handleResizeMove, handleResizeUp]);
 
@@ -451,10 +524,18 @@ export const CanvasNode = React.memo(function CanvasNode({
                     </div>
                 ) : null}
 
-                {!referenceSelectionState ? <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} /> : null}
-                {!referenceSelectionState ? <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} /> : null}
-                {!referenceSelectionState ? <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} /> : null}
-                {!referenceSelectionState ? <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} /> : null}
+                {!referenceSelectionState ? (
+                    <>
+                        <EdgeResizeHandle side="top" onMouseDown={handleResizeMouseDown} />
+                        <EdgeResizeHandle side="right" onMouseDown={handleResizeMouseDown} />
+                        <EdgeResizeHandle side="bottom" onMouseDown={handleResizeMouseDown} />
+                        <EdgeResizeHandle side="left" onMouseDown={handleResizeMouseDown} />
+                        <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
+                        <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
+                        <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
+                        <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
+                    </>
+                ) : null}
             </div>
 
             {!referenceSelectionState && !isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
@@ -525,11 +606,11 @@ function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "
     // 也要在这里兜一次，否则刷新后又会原样显示出来。
     const errorText = node.metadata?.errorDetails ? humanizeUpstreamError(node.metadata.errorDetails) : "";
     return (
-        <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
+        <div className="flex max-h-full max-w-[260px] flex-col items-center justify-center gap-2 overflow-y-auto px-4 py-3 text-center">
             <div className="text-xs leading-5 text-red-300">{errorText || t("canvas.node.failed")}</div>
             <button
                 type="button"
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
                 style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                 onClick={(event) => {
                     event.stopPropagation();
@@ -556,8 +637,8 @@ function PendingContent({ node, theme, onQuery }: Pick<NodeContentRendererProps,
     const { t } = useTranslation();
     const [querying, setQuerying] = useState(false);
     return (
-        <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
-            <div className="flex size-10 items-center justify-center rounded-full border-2" style={{ borderColor: theme.node.stroke }}>
+        <div className="flex max-h-full max-w-[260px] flex-col items-center justify-center gap-1.5 overflow-y-auto px-4 py-2.5 text-center">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-full border-2" style={{ borderColor: theme.node.stroke }}>
                 <Clock3 className="size-4" style={{ color: theme.node.activeStroke }} />
             </div>
             <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
@@ -567,7 +648,7 @@ function PendingContent({ node, theme, onQuery }: Pick<NodeContentRendererProps,
             <button
                 type="button"
                 disabled={querying}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02] disabled:cursor-default disabled:opacity-70 disabled:hover:scale-100"
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02] disabled:cursor-default disabled:opacity-70 disabled:hover:scale-100"
                 style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                 onClick={async (event) => {
                     event.stopPropagation();
@@ -752,8 +833,8 @@ function ImageNodeContent(props: NodeContentRendererProps) {
 function EmptyImageContent({ theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
     return (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
-            <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
+            <div className="flex size-11 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
                 <ImageIcon className="size-6 opacity-30" />
             </div>
             <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.node.emptyImage")}</span>
@@ -802,7 +883,7 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
 
     if (!content)
         return (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
@@ -1024,7 +1105,7 @@ function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
     const { t } = useTranslation();
     const failed = image?.status === "error";
     return (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 py-3 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span> : <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />}
             {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
         </div>
@@ -1085,15 +1166,36 @@ function BatchFrame({ batchCount, batchExpanded, children }: { batchCount: numbe
         </div>
     );
 }
+function EdgeResizeHandle({ side, onMouseDown }: { side: ResizeEdge; onMouseDown: (event: React.MouseEvent, side: ResizeEdge) => void }) {
+    const containerClass = {
+        top: "-top-[8px] left-3 right-3 h-[12px] cursor-ns-resize",
+        bottom: "-bottom-[8px] left-3 right-3 h-[12px] cursor-ns-resize",
+        left: "-left-[8px] top-3 bottom-3 w-[12px] cursor-ew-resize",
+        right: "-right-[8px] top-3 bottom-3 w-[12px] cursor-ew-resize",
+    }[side];
+    const barClass = {
+        top: "inset-x-1 top-[6px] h-[2px]",
+        bottom: "inset-x-1 bottom-[6px] h-[2px]",
+        left: "inset-y-1 left-[6px] w-[2px]",
+        right: "inset-y-1 right-[6px] w-[2px]",
+    }[side];
+
+    return (
+        <div className={`group/resize absolute z-40 ${containerClass}`} onMouseDown={(event) => onMouseDown(event, side)}>
+            <div className={`pointer-events-none absolute rounded-full opacity-0 transition-opacity duration-150 group-hover/resize:opacity-80 ${barClass}`} style={{ background: selectionBlue }} />
+        </div>
+    );
+}
+
 function ResizeHandle({ corner, onMouseDown }: { corner: ResizeCorner; onMouseDown: (event: React.MouseEvent, corner: ResizeCorner) => void }) {
     const positionClass = {
-        "top-left": "-left-[14px] -top-[14px] cursor-nwse-resize",
-        "top-right": "-right-[14px] -top-[14px] cursor-nesw-resize",
-        "bottom-left": "-bottom-[14px] -left-[14px] cursor-nesw-resize",
-        "bottom-right": "-bottom-[14px] -right-[14px] cursor-nwse-resize",
+        "top-left": "-left-[12px] -top-[12px] cursor-nwse-resize",
+        "top-right": "-right-[12px] -top-[12px] cursor-nesw-resize",
+        "bottom-left": "-bottom-[12px] -left-[12px] cursor-nesw-resize",
+        "bottom-right": "-bottom-[12px] -right-[12px] cursor-nwse-resize",
     }[corner];
 
-    return <div className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
+    return <div className={`absolute z-50 size-6 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
 }
 
 function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "right"; visible: boolean; onMouseDown: (event: React.MouseEvent) => void }) {
@@ -1101,8 +1203,8 @@ function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "r
 
     return (
         <div
-            className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${
-                side === "left" ? "-left-6" : "-right-6"
+            className={`absolute top-1/2 z-[55] flex size-8 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${
+                side === "left" ? "-left-4" : "-right-4"
             } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
             onMouseDown={onMouseDown}
         >

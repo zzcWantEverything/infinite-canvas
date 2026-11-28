@@ -2,7 +2,7 @@ import i18n from "@/i18n";
 import { CanvasNodeType } from "@/types/canvas";
 import type { CanvasNodeMetadata } from "@/types/canvas";
 import { getNodeSpec as getRegistryNodeSpec } from "@/lib/canvas/node-registry";
-import { MEDIA_NODE_WIDTH } from "@/lib/canvas/canvas-node-size";
+import { MEDIA_NODE_DEFAULT_HEIGHT, MEDIA_NODE_WIDTH } from "@/lib/canvas/canvas-node-size";
 
 type CanvasNodeSpec = {
     width: number;
@@ -12,17 +12,17 @@ type CanvasNodeSpec = {
 };
 
 export const NODE_DEFAULT_SIZE = {
-    [CanvasNodeType.Image]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.image"); } },
+    [CanvasNodeType.Image]: { width: MEDIA_NODE_WIDTH, height: MEDIA_NODE_DEFAULT_HEIGHT, get title() { return i18n.t("canvas.nodeTypes.image"); } },
     [CanvasNodeType.Text]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.text"); } },
     [CanvasNodeType.Config]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.config"); } },
-    [CanvasNodeType.Video]: { width: MEDIA_NODE_WIDTH, height: Math.round((MEDIA_NODE_WIDTH * 9) / 16), get title() { return i18n.t("canvas.nodeTypes.video"); } },
+    [CanvasNodeType.Video]: { width: MEDIA_NODE_WIDTH, height: MEDIA_NODE_DEFAULT_HEIGHT, get title() { return i18n.t("canvas.nodeTypes.video"); } },
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
     [CanvasNodeType.Image]: {
-        width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Image].title; },
+        width: NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, height: NODE_DEFAULT_SIZE[CanvasNodeType.Image].height, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Image].title; },
         metadata: { content: "", status: "idle" },
     },
     [CanvasNodeType.Text]: {

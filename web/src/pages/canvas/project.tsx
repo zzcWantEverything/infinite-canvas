@@ -20,7 +20,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { fitNodeSize, nodeSizeByWidth, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
+import { NODE_MIN_WIDTH, fitNodeSize, nodeSizeByWidth, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -1963,11 +1963,8 @@ function InfiniteCanvasPage() {
 
     const createImageFileNode = useCallback(async (file: File, position: Position) => {
         const image = await uploadImage(file);
-        // 拖入的图片固定成视频节点的比例（横图 16:9、竖图 9:16），尺寸和视频节点一致，
-        // 不再按图片原始宽高比浮动，避免画布里大图小图、横竖混杂参差不齐。
-        const landscape = (image.width || 0) >= (image.height || 0);
-        const videoSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
-        const size = nodeSizeFromRatio(landscape ? "16:9" : "9:16", videoSpec.width, videoSpec.height) || videoSpec;
+        const fallback = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+        const size = nodeSizeByWidth(image.width || fallback.width, image.height || fallback.height);
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const newNode: CanvasNodeData = {
             id,
@@ -2418,7 +2415,7 @@ function InfiniteCanvasPage() {
         if (!node.metadata?.content) return;
         const cropped = await cropDataUrl(node.metadata.content, crop);
         const image = await uploadImage(cropped);
-        const width = Math.min(node.width, Math.max(220, image.width));
+        const width = Math.min(node.width, Math.max(NODE_MIN_WIDTH, image.width));
         const childId = nanoid();
         const child: CanvasNodeData = {
             id: childId,
